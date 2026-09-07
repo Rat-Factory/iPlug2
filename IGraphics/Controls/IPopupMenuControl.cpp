@@ -172,7 +172,8 @@ void IPopupMenuControl::OnMouseDown(float x, float y, const IMouseMod& mod)
 {
   if(GetState() == kExpanded)
   {
-    mMouseCellBounds = mActiveMenuPanel->HitTestCells(x, y);
+    if (mActiveMenuPanel)
+      mMouseCellBounds = mActiveMenuPanel->HitTestCells(x, y);
     CollapseEverything();
   }
   else
@@ -190,6 +191,12 @@ void IPopupMenuControl::OnMouseDrag(float x, float y, float dX, float dY, const 
 
 void IPopupMenuControl::OnMouseOver(float x, float y, const IMouseMod& mod)
 {
+  if (!mActiveMenuPanel && mMenuPanels.GetSize())
+    mActiveMenuPanel = mMenuPanels.Get(0);
+
+  if (!mActiveMenuPanel)
+    return;
+
   mMouseCellBounds = mActiveMenuPanel->HitTestCells(x, y);
   
   // if the mouse event was outside of the active MenuPanel - could be on another menu or completely outside
@@ -219,7 +226,7 @@ void IPopupMenuControl::OnMouseOver(float x, float y, const IMouseMod& mod)
   
   CalculateMenuPanels(x, y);
   
-  if(mActiveMenuPanel->mScroller)
+  if(mActiveMenuPanel && mActiveMenuPanel->mScroller)
   {
     if(mMouseCellBounds == mActiveMenuPanel->mCellBounds.Get(0))
     {
@@ -503,6 +510,9 @@ void IPopupMenuControl::GetPanelDimensions(IPopupMenu&menu, float& width, float&
 
 void IPopupMenuControl::CalculateMenuPanels(float x, float y)
 {
+  if (!mActiveMenuPanel)
+    return;
+
   float calloutSpace =0.f;
   
   if(mCallOut)
@@ -800,6 +810,15 @@ void IPopupMenuControl::Expand(const IRECT& anchorArea)
 
 void IPopupMenuControl::CollapseEverything()
 {
+  if (!mActiveMenuPanel)
+  {
+    mSubMenuOpened = false;
+    mState = kCollapsed;
+    Hide(true);
+    SetDirty(false);
+    return;
+  }
+
   IPopupMenu* pClickedMenu = &mActiveMenuPanel->mMenu;
   
   pClickedMenu->SetChosenItemIdx(-1);

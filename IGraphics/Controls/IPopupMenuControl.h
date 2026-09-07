@@ -124,7 +124,7 @@ public:
   void CreatePopupMenu(IPopupMenu& menu, const IRECT& anchorArea);
 
   /** @return \true if the pop-up is fully expanded */
-  bool GetExpanded() const { return mState == kExpanded; }
+  bool GetExpanded() const { return mState == kExpanded && mActiveMenuPanel != nullptr; }
 
   /** @return EPopupState indicating the state of the pop-up */
   EPopupState GetState() const { return mState; }

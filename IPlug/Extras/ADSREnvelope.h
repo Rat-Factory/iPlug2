@@ -118,6 +118,18 @@ public:
   {
     return mPrevOutput;
   }
+
+  /** @return the current envelope stage (see EStage) */
+  int GetStage() const
+  {
+    return mStage;
+  }
+
+  /** @return the internal stage normalized value [0..1] */
+  T GetEnvValue() const
+  {
+    return mEnvValue;
+  }
   
   /** Trigger/Start the envelope 
    * @param level The overall depth of the envelope (usually linked to MIDI velocity)  
