@@ -18,20 +18,13 @@
 #if !defined(NDEBUG) || defined(IPLUG_LIVE_EDIT)
 
 #include "IControl.h"
+#include "IGraphicsJSON.h"
+#include "IGraphicsIntrospect.h"
 #include <cmath>
 #include <cstdio>
 #include <fstream>
 #include <string>
 #include <vector>
-
-#if defined(IPLUG_LIVE_EDIT_CLASS_NAME)
-#include <cstring>
-#include <typeinfo>
-#if defined(__GNUG__) && !defined(_WIN32)
-#include <cxxabi.h>
-#include <cstdlib>
-#endif
-#endif
 
 BEGIN_IPLUG_NAMESPACE
 BEGIN_IGRAPHICS_NAMESPACE
@@ -373,74 +366,6 @@ public:
       return input;
   }
 
-  static void AppendJsonString(std::string& out, const char* str)
-  {
-    out.push_back('"');
-
-    if (str)
-    {
-      for (const char* p = str; *p; ++p)
-      {
-        unsigned char c = static_cast<unsigned char>(*p);
-
-        switch (c)
-        {
-          case '\\': out += "\\\\"; break;
-          case '"': out += "\\\""; break;
-          case '\b': out += "\\b"; break;
-          case '\f': out += "\\f"; break;
-          case '\n': out += "\\n"; break;
-          case '\r': out += "\\r"; break;
-          case '\t': out += "\\t"; break;
-          default:
-          {
-            if (c < 0x20)
-            {
-              char esc[8];
-              std::snprintf(esc, sizeof(esc), "\\u%04x", c);
-              out += esc;
-            }
-            else
-            {
-              out.push_back(static_cast<char>(c));
-            }
-            break;
-          }
-        }
-      }
-    }
-
-    out.push_back('"');
-  }
-
-#if defined(IPLUG_LIVE_EDIT_CLASS_NAME)
-  static std::string DemangledClassName(IControl* pControl)
-  {
-    if (!pControl)
-      return "";
-
-    const char* mangled = typeid(*pControl).name();
-#if defined(__GNUG__) && !defined(_WIN32)
-    int status = 0;
-    char* demangled = abi::__cxa_demangle(mangled, nullptr, nullptr, &status);
-    const char* name = (status == 0 && demangled) ? demangled : (mangled ? mangled : "");
-#else
-    const char* name = mangled ? mangled : "";
-#endif
-    static const char prefix[] = "iplug::igraphics::";
-    const std::size_t prefixLen = sizeof(prefix) - 1;
-    const char* compact = std::strncmp(name, prefix, prefixLen) == 0 ? name + prefixLen : name;
-    std::string result(compact);
-
-#if defined(__GNUG__) && !defined(_WIN32)
-    if (demangled)
-      std::free(demangled);
-#endif
-
-    return result;
-  }
-#endif
-
   void AppendControlDescriptor(std::string& out, IControl* pControl)
   {
     if (!pControl)
@@ -449,17 +374,18 @@ public:
       return;
     }
 
-    const IRECT r = pControl->GetRECT();
     out += "{\"idx\":";
     out += std::to_string(GetUI()->GetControlIdx(pControl));
 #if defined(IPLUG_LIVE_EDIT_CLASS_NAME)
     out += ",\"className\":";
-    AppendJsonString(out, DemangledClassName(pControl).c_str());
+    AppendJsonString(out, GetControlClassName(pControl).c_str());
 #endif
     out += ",\"tag\":";
     out += std::to_string(pControl->GetTag());
     out += ",\"paramIdx\":";
     out += std::to_string(pControl->GetParamIdx());
+    // Live edit events use rounded integer rects with the l/t/r/b keys spliced in
+    const IRECT r = pControl->GetRECT();
     out += ",\"l\":";
     out += std::to_string(static_cast<int>(std::round(r.L)));
     out += ",\"t\":";
@@ -473,15 +399,7 @@ public:
 
   static void AppendRect(std::string& out, const IRECT& r)
   {
-    out += "{\"l\":";
-    out += std::to_string(static_cast<int>(std::round(r.L)));
-    out += ",\"t\":";
-    out += std::to_string(static_cast<int>(std::round(r.T)));
-    out += ",\"r\":";
-    out += std::to_string(static_cast<int>(std::round(r.R)));
-    out += ",\"b\":";
-    out += std::to_string(static_cast<int>(std::round(r.B)));
-    out += "}";
+    AppendJsonRect(out, r, true);
   }
 
   void EmitControlChanged(IControl* pControl, const IRECT& previousRECT)

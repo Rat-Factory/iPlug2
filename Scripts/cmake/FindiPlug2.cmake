@@ -41,6 +41,7 @@ endif()
 # Include WAM/Web/Wasm modules for Emscripten builds
 if(CMAKE_SYSTEM_NAME STREQUAL "Emscripten")
   option(IPLUG2_WASM_LIVE_EDIT "Enable IGraphics live edit in Wasm builds" OFF)
+  option(IPLUG2_WASM_WEBMCP "Expose the IGraphics/DSP agent bridge (WebMCP) exports in Wasm builds" ON)
 
   include(${CMAKE_CURRENT_LIST_DIR}/WAM.cmake)
   include(${CMAKE_CURRENT_LIST_DIR}/WEB.cmake)

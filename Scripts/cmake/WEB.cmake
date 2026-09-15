@@ -40,6 +40,9 @@ if(NOT TARGET iPlug2::Web)
     ${IGRAPHICS_DIR}/Controls/ITextEntryControl.cpp
     # IGraphics Web platform (includes IGraphicsNanoVG.cpp)
     ${IGRAPHICS_DIR}/Platforms/IGraphicsWeb.cpp
+    # Agent bridge (WebMCP): platform-independent core + Emscripten exports (compiled out unless IPLUG_WEBMCP)
+    ${IGRAPHICS_DIR}/IGraphicsIntrospect.cpp
+    ${IGRAPHICS_DIR}/Platforms/IGraphicsWebMCP.cpp
   )
 
   target_sources(iPlug2::Web INTERFACE ${WEB_SRC})
@@ -73,6 +76,9 @@ if(NOT TARGET iPlug2::Web)
   if(IPLUG2_WASM_LIVE_EDIT)
     string(APPEND WEB_EXPORTS ",'_iplug_set_live_edit'")
   endif()
+  if(IPLUG2_WASM_WEBMCP)
+    string(APPEND WEB_EXPORTS ",'_iplug_webmcp_version','_iplug_webmcp_num_graphics','_iplug_webmcp_get_graphics','_iplug_webmcp_last_error','_iplug_webmcp_live_edit_available','_iplug_webmcp_get_ui_tree','_iplug_webmcp_get_control','_iplug_webmcp_set_control_value','_iplug_webmcp_set_control_default','_iplug_webmcp_set_control_hidden','_iplug_webmcp_set_control_disabled','_iplug_webmcp_set_control_text','_iplug_webmcp_set_control_prop','_iplug_webmcp_set_control_bounds','_iplug_webmcp_set_background_color','_iplug_webmcp_mouse','_iplug_webmcp_wheel','_iplug_webmcp_key','_iplug_webmcp_flush_draw'")
+  endif()
 
   # Emscripten link flags for Web controller
   # - BINARYEN_ASYNC_COMPILATION=1: Async compilation (can run on main thread)
@@ -99,6 +105,10 @@ if(NOT TARGET iPlug2::Web)
     # Force-include GLES2 header so GL types are defined before NanoVG
     -include GLES2/gl2.h
   )
+
+  if(IPLUG2_WASM_WEBMCP)
+    target_compile_definitions(iPlug2::Web INTERFACE IPLUG_WEBMCP=1)
+  endif()
 
   if(IPLUG2_WASM_LIVE_EDIT)
     target_compile_definitions(iPlug2::Web INTERFACE IPLUG_LIVE_EDIT=1)

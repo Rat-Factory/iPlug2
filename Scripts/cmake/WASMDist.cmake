@@ -356,19 +356,28 @@ function(iplug_configure_wasm_host_controls project_name output_dir)
   set(SCRIPTS_DIR "${output_dir}/scripts")
   file(MAKE_DIRECTORY ${SCRIPTS_DIR})
 
-  set(CONTROLS_SOURCE "${WASM_TEMPLATE_DIR}/scripts/IPlugWasmHostControls.js")
-  set(CONTROLS_OUTPUT "${SCRIPTS_DIR}/IPlugWasmHostControls.js")
+  # Shared, verbatim (no placeholders) host page scripts: the footer UI and the
+  # WebMCP agent bridge.
+  set(HOST_SCRIPTS IPlugWasmHostControls.js IPlugWasmWebMCP.js)
+  set(HOST_SCRIPT_OUTPUTS)
 
-  add_custom_command(
-    OUTPUT ${CONTROLS_OUTPUT}
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${CONTROLS_SOURCE} ${CONTROLS_OUTPUT}
-    DEPENDS ${CONTROLS_SOURCE}
-    COMMENT "Staging shared Wasm host controls"
-    VERBATIM
-  )
+  foreach(script ${HOST_SCRIPTS})
+    set(SCRIPT_SOURCE "${WASM_TEMPLATE_DIR}/scripts/${script}")
+    set(SCRIPT_OUTPUT "${SCRIPTS_DIR}/${script}")
+
+    add_custom_command(
+      OUTPUT ${SCRIPT_OUTPUT}
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SCRIPT_SOURCE} ${SCRIPT_OUTPUT}
+      DEPENDS ${SCRIPT_SOURCE}
+      COMMENT "Staging shared Wasm host script ${script}"
+      VERBATIM
+    )
+
+    list(APPEND HOST_SCRIPT_OUTPUTS ${SCRIPT_OUTPUT})
+  endforeach()
 
   add_custom_target(${project_name}_wasm_host_controls
-    DEPENDS ${CONTROLS_OUTPUT}
+    DEPENDS ${HOST_SCRIPT_OUTPUTS}
   )
 endfunction()
 

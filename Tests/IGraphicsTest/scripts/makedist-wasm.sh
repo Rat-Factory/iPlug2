@@ -215,6 +215,7 @@ sed -i.bak "s/NAME_PLACEHOLDER/$PROJECT_NAME/g" scripts/$PROJECT_NAME-processor.
 
 # Copy shared host controls
 cp $IPLUG2_ROOT/IPlug/WEB/TemplateWasm/scripts/IPlugWasmHostControls.js scripts/IPlugWasmHostControls.js
+cp $IPLUG2_ROOT/IPlug/WEB/TemplateWasm/scripts/IPlugWasmWebMCP.js scripts/IPlugWasmWebMCP.js
 
 # Copy and process HTML template
 # IMPORTANT: Replace NAME_PLACEHOLDER_LC first (longer match) before NAME_PLACEHOLDER

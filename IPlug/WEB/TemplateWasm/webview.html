@@ -7,6 +7,7 @@
   <link href="styles/style.css" rel="stylesheet">
   <script src="scripts/NAME_PLACEHOLDER-bundle.js"></script>
   <script src="scripts/IPlugWasmHostControls.js"></script>
+  <script src="scripts/IPlugWasmWebMCP.js"></script>
   <style>
     html,
     body {
@@ -170,6 +171,19 @@
         createController: ({ audioContext }) => ensureController(audioContext)
       });
 
+      // WebMCP agent bridge. The loaded WebView UI can register explicit
+      // actions through window.iPlugWebMCP.registerAction({ id, label, run })
+      // or annotate clickable elements with data-iplug-action="id".
+      const webmcp = new IPlugWasmWebMCP({
+        pluginName: PLUGIN_NAME,
+        backend: 'webview',
+        hostControls,
+        getController: () => controller,
+        webview: { root: webviewRoot, isReady: () => webViewReady }
+      });
+      window.iPlugWebMCP = webmcp.webviewAPI;
+      window.iPlugWebMCPBridge = webmcp;
+
       function setStatus(text) {
         hostControls.setStatus(text);
       }
@@ -295,6 +309,7 @@
         controller.connectUI(mod);
         window.iPlugController = controller;
         flushControllerActions();
+        webmcp.refresh();
         return controller;
       }
 
@@ -759,11 +774,13 @@
         flushEvaluations();
         flushWebViewMessages();
         notifyWebContentLoaded(ownerPtr);
+        webmcp.refresh();
       }
 
       async function loadWebViewFile(ownerPtr, fileName, webRoot) {
         activeWebViewOwnerPtr = ownerPtr;
         webViewReady = false;
+        webmcp.webviewAPI.reset();
         hostControls.setReady(false);
         showLoading(`Loading ${PLUGIN_NAME} UI...`);
 
@@ -787,6 +804,7 @@
       async function loadWebViewHTML(ownerPtr, html, baseHref = hostBaseHref) {
         activeWebViewOwnerPtr = ownerPtr;
         webViewReady = false;
+        webmcp.webviewAPI.reset();
         hostControls.setReady(false);
         showLoading(`Loading ${PLUGIN_NAME} UI...`);
 
@@ -803,6 +821,7 @@
       async function loadWebViewURL(ownerPtr, url) {
         activeWebViewOwnerPtr = ownerPtr;
         webViewReady = false;
+        webmcp.webviewAPI.reset();
         hostControls.setReady(false);
         showLoading(`Loading ${PLUGIN_NAME} UI...`);
 

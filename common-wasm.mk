@@ -82,7 +82,9 @@ WASM_DSP_SRC = $(IPLUG_WEB_PATH)/IPlugWasmDSP.cpp \
 # May be overridden in a per-project config to $(WASM_WEBVIEW_UI_SRC) for WebView builds.
 WASM_UI_SRC = $(IPLUG_WEB_PATH)/IPlugWasmUI.cpp \
 	$(IGRAPHICS_SRC) \
-	$(IGRAPHICS_PATH)/IGraphicsEditorDelegate.cpp
+	$(IGRAPHICS_PATH)/IGraphicsEditorDelegate.cpp \
+	$(IGRAPHICS_PATH)/IGraphicsIntrospect.cpp \
+	$(PLATFORMS_PATH)/IGraphicsWebMCP.cpp
 
 # WebView UI module source files (runs on main thread without IGraphics)
 WASM_WEBVIEW_UI_SRC = $(IPLUG_WEB_PATH)/IPlugWasmUI.cpp \
@@ -107,6 +109,13 @@ WASM_DSP_CFLAGS = -DWASM_DSP_API \
 WASM_UI_CFLAGS = -DWASM_UI_API \
 -DIPLUG_EDITOR=1
 
+# Agent bridge (WebMCP) exports, on by default; build with IPLUG_WEBMCP=0 to omit
+IPLUG_WEBMCP ?= 1
+ifneq ($(IPLUG_WEBMCP),0)
+WASM_UI_CFLAGS += -DIPLUG_WEBMCP=1
+WASM_WEBMCP_EXPORTS = , '_iplug_webmcp_version', '_iplug_webmcp_num_graphics', '_iplug_webmcp_get_graphics', '_iplug_webmcp_last_error', '_iplug_webmcp_live_edit_available', '_iplug_webmcp_get_ui_tree', '_iplug_webmcp_get_control', '_iplug_webmcp_set_control_value', '_iplug_webmcp_set_control_default', '_iplug_webmcp_set_control_hidden', '_iplug_webmcp_set_control_disabled', '_iplug_webmcp_set_control_text', '_iplug_webmcp_set_control_prop', '_iplug_webmcp_set_control_bounds', '_iplug_webmcp_set_background_color', '_iplug_webmcp_mouse', '_iplug_webmcp_wheel', '_iplug_webmcp_key', '_iplug_webmcp_flush_draw'
+endif
+
 # WebView UI module CFLAGS
 WEBVIEW_CFLAGS = -DWEBVIEW_EDITOR_DELEGATE \
 -DNO_IGRAPHICS
@@ -115,7 +124,7 @@ WEBVIEW_CFLAGS = -DWEBVIEW_EDITOR_DELEGATE \
 WASM_DSP_EXPORTS = "['_malloc', '_free']"
 
 # UI module exports
-WASM_UI_EXPORTS = "['_malloc', '_free', '_main', '_iplug_fsready', '_iplug_syncfs', '_iplug_popup_menu_selected']"
+WASM_UI_EXPORTS = "['_malloc', '_free', '_main', '_iplug_fsready', '_iplug_syncfs', '_iplug_popup_menu_selected'$(WASM_WEBMCP_EXPORTS)]"
 
 # WebView UI module exports
 # Note: _iplug_popup_menu_selected is intentionally omitted - it is defined in

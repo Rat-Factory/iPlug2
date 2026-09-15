@@ -48,6 +48,9 @@ if(NOT TARGET iPlug2::WasmUI)
     ${IGRAPHICS_DIR}/Controls/ITextEntryControl.cpp
     # IGraphics Web platform (includes IGraphicsNanoVG.cpp)
     ${IGRAPHICS_DIR}/Platforms/IGraphicsWeb.cpp
+    # Agent bridge (WebMCP): platform-independent core + Emscripten exports (compiled out unless IPLUG_WEBMCP)
+    ${IGRAPHICS_DIR}/IGraphicsIntrospect.cpp
+    ${IGRAPHICS_DIR}/Platforms/IGraphicsWebMCP.cpp
   )
 
   target_sources(iPlug2::WasmUI INTERFACE ${WASM_UI_SRC})
@@ -79,6 +82,9 @@ if(NOT TARGET iPlug2::WasmUI)
   set(WASM_UI_EXPORTS "'_malloc','_free','_main','_iplug_fsready','_iplug_syncfs','_iplug_popup_menu_selected'")
   if(IPLUG2_WASM_LIVE_EDIT)
     string(APPEND WASM_UI_EXPORTS ",'_iplug_set_live_edit'")
+  endif()
+  if(IPLUG2_WASM_WEBMCP)
+    string(APPEND WASM_UI_EXPORTS ",'_iplug_webmcp_version','_iplug_webmcp_num_graphics','_iplug_webmcp_get_graphics','_iplug_webmcp_last_error','_iplug_webmcp_live_edit_available','_iplug_webmcp_get_ui_tree','_iplug_webmcp_get_control','_iplug_webmcp_set_control_value','_iplug_webmcp_set_control_default','_iplug_webmcp_set_control_hidden','_iplug_webmcp_set_control_disabled','_iplug_webmcp_set_control_text','_iplug_webmcp_set_control_prop','_iplug_webmcp_set_control_bounds','_iplug_webmcp_set_background_color','_iplug_webmcp_mouse','_iplug_webmcp_wheel','_iplug_webmcp_key','_iplug_webmcp_flush_draw'")
   endif()
   set(WASM_UI_OPT)
   if(IPLUG2_WASM_UI_OPTIMIZATION)
@@ -114,6 +120,10 @@ if(NOT TARGET iPlug2::WasmUI)
     # Force-include GLES2 header so GL types are defined before NanoVG
     -include GLES2/gl2.h
   )
+
+  if(IPLUG2_WASM_WEBMCP)
+    target_compile_definitions(iPlug2::WasmUI INTERFACE IPLUG_WEBMCP=1)
+  endif()
 
   if(IPLUG2_WASM_LIVE_EDIT)
     target_compile_definitions(iPlug2::WasmUI INTERFACE IPLUG_LIVE_EDIT=1)

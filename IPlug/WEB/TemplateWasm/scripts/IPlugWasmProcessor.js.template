@@ -206,6 +206,157 @@ class NAME_PLACEHOLDERProcessor extends AudioWorkletProcessor {
         // Explicit cleanup request - free WASM buffers and destroy instance
         this._cleanup();
         break;
+
+      case 'request':
+        // Request/response exchange from IPlugWasmController.request() (agent bridge)
+        this._handleRequest(msg);
+        break;
+
+      case 'cancel':
+        // Requests are handled synchronously, so there is nothing to cancel;
+        // the controller has already rejected its side.
+        break;
+    }
+  }
+
+  /**
+   * Handle a request from IPlugWasmController.request(). Every operation
+   * validates its arguments fully before mutating anything, so batches are
+   * all-or-nothing. Replies {verb:'response', requestId, ok, data|error, code}.
+   */
+  _handleRequest(msg) {
+    const reply = (payload) => this.port.postMessage({ verb: 'response', requestId: msg.requestId, ...payload });
+    const fail = (error, code = 'invalid') => {
+      const err = new Error(error);
+      err.code = code;
+      throw err;
+    };
+
+    try {
+      const Module = this.Module;
+      if (!this.instanceId) fail('DSP instance is unavailable.', 'not-ready');
+
+      const numParams = Module.getNumParams(this.instanceId);
+      const args = msg.args || {};
+
+      const checkIdx = (paramIdx) => {
+        if (!Number.isInteger(paramIdx) || paramIdx < 0 || paramIdx >= numParams) {
+          fail(`Invalid parameter index ${paramIdx}; expected 0..${numParams - 1}.`);
+        }
+      };
+
+      // Resolve one {paramIdx, normalized|value|text} entry to a normalized value without applying it.
+      const resolveValue = (entry) => {
+        checkIdx(entry.paramIdx);
+        const given = ['normalized', 'value', 'text'].filter((key) => entry[key] !== undefined);
+        if (given.length !== 1) fail('Provide exactly one of normalized, value or text.');
+
+        if (entry.text !== undefined) {
+          if (typeof entry.text !== 'string') fail('text must be a string.');
+          return { paramIdx: entry.paramIdx, text: entry.text };
+        }
+
+        let normalized;
+        if (entry.value !== undefined) {
+          if (!Number.isFinite(entry.value)) fail('value must be a finite number.');
+          if (typeof Module.paramToNormalized !== 'function') fail('Native values are not supported by this DSP build; use normalized.', 'not-supported');
+          normalized = Module.paramToNormalized(this.instanceId, entry.paramIdx, entry.value);
+        } else {
+          normalized = entry.normalized;
+        }
+        if (!Number.isFinite(normalized) || normalized < 0 || normalized > 1) fail('normalized must be between 0 and 1.');
+        return { paramIdx: entry.paramIdx, normalized };
+      };
+
+      const apply = (resolved) => {
+        const ok = resolved.text !== undefined
+          ? Module.setParamFromString(this.instanceId, resolved.paramIdx, resolved.text)
+          : Module.setParamNormalized(this.instanceId, resolved.paramIdx, resolved.normalized);
+        if (!ok) fail(`Could not set parameter ${resolved.paramIdx}.`, 'dsp-error');
+      };
+
+      const info = () => JSON.parse(Module.getPluginInfoJSON(this.instanceId));
+      const changed = (indices) => {
+        const params = info().params;
+        return indices.map((idx) => params.find((p) => p.idx === idx)).filter(Boolean);
+      };
+
+      switch (msg.op) {
+        case 'getParameters':
+          reply({ ok: true, data: info() });
+          break;
+
+        case 'setParameter': {
+          const resolved = resolveValue(args);
+          apply(resolved);
+          reply({ ok: true, data: { changed: changed([resolved.paramIdx]) } });
+          break;
+        }
+
+        case 'setParameters': {
+          if (!Array.isArray(args.values) || args.values.length === 0) fail('values must be a non-empty array.');
+          const resolved = args.values.map(resolveValue);
+          resolved.forEach(apply);
+          reply({ ok: true, data: { changed: changed(resolved.map((r) => r.paramIdx)) } });
+          break;
+        }
+
+        case 'resetParameter': {
+          let indices;
+          if (args.paramIdx === undefined) {
+            indices = Array.from({ length: numParams }, (_, i) => i);
+          } else {
+            checkIdx(args.paramIdx);
+            indices = [args.paramIdx];
+          }
+          for (const idx of indices) {
+            if (!Module.resetParam(this.instanceId, idx)) fail(`Could not reset parameter ${idx}.`, 'dsp-error');
+          }
+          reply({ ok: true, data: { changed: changed(indices) } });
+          break;
+        }
+
+        case 'getParamDisplay':
+          checkIdx(args.paramIdx);
+          reply({ ok: true, data: { paramIdx: args.paramIdx, display: Module.getParamDisplay(this.instanceId, args.paramIdx) } });
+          break;
+
+        case 'getState': {
+          if (typeof Module.serializeState !== 'function') fail('State serialization is not available in this DSP build.', 'not-supported');
+          const base64 = Module.serializeState(this.instanceId);
+          if (!base64) fail('SerializeState failed.', 'dsp-error');
+          reply({ ok: true, data: { format: 'iplug-state-base64', base64, byteLength: Math.floor(base64.length * 3 / 4) } });
+          break;
+        }
+
+        case 'setState': {
+          if (typeof Module.unserializeState !== 'function') fail('State serialization is not available in this DSP build.', 'not-supported');
+          if (typeof args.base64 !== 'string' || !args.base64) fail('base64 must be a non-empty string.');
+          if (!Module.unserializeState(this.instanceId, args.base64)) fail('UnserializeState rejected the data.', 'dsp-error');
+          reply({ ok: true, data: info() });
+          break;
+        }
+
+        case 'getPresets': {
+          const count = Module.getNumPresets ? Module.getNumPresets(this.instanceId) : 0;
+          const presets = Array.from({ length: count }, (_, i) => ({ idx: i, name: Module.getPresetName(this.instanceId, i) }));
+          reply({ ok: true, data: { presets } });
+          break;
+        }
+
+        case 'restorePreset': {
+          const count = Module.getNumPresets ? Module.getNumPresets(this.instanceId) : 0;
+          if (!Number.isInteger(args.presetIdx) || args.presetIdx < 0 || args.presetIdx >= count) fail(`Invalid preset index; expected 0..${count - 1}.`);
+          if (!Module.restorePreset(this.instanceId, args.presetIdx)) fail('RestorePreset failed.', 'dsp-error');
+          reply({ ok: true, data: info() });
+          break;
+        }
+
+        default:
+          fail(`Unknown operation: ${msg.op}`, 'unknown-op');
+      }
+    } catch (err) {
+      reply({ ok: false, error: err.message || String(err), code: err.code || 'error' });
     }
   }
 

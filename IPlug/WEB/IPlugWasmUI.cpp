@@ -143,6 +143,10 @@ extern "C" EMSCRIPTEN_KEEPALIVE void IPlugWasmUI_ApplyPendingParentWindowResize(
 // Callback functions called by JavaScript controller when DSP sends messages
 static void _SendParameterValueFromDelegate(int paramIdx, double normalizedValue)
 {
+  if (paramIdx < 0 || paramIdx >= gPlug->NParams()) return;
+  // The split UI has its own parameter objects. Update them before controls
+  // format their display values; this must not echo a UI change to the DSP.
+  gPlug->GetParam(paramIdx)->SetNormalized(normalizedValue);
   gPlug->SendParameterValueFromDelegate(paramIdx, normalizedValue, true);
 }
 

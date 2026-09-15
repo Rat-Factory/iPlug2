@@ -57,7 +57,9 @@ WAM_SRC = $(IPLUG_WEB_PATH)/IPlugWAM.cpp \
 #every cpp file that is needed for the "WEB" graphics WASM module
 WEB_SRC = $(IGRAPHICS_SRC) \
 $(IPLUG_WEB_PATH)/IPlugWeb.cpp \
-$(IGRAPHICS_PATH)/IGraphicsEditorDelegate.cpp
+$(IGRAPHICS_PATH)/IGraphicsEditorDelegate.cpp \
+$(IGRAPHICS_PATH)/IGraphicsIntrospect.cpp \
+$(PLATFORMS_PATH)/IGraphicsWebMCP.cpp
 
 NANOVG_LDFLAGS = -s USE_WEBGL2=0 -s FULL_ES3=1
 
@@ -75,13 +77,20 @@ WAM_CFLAGS = -DWAM_API \
 WEB_CFLAGS = -DWEB_API \
 -DIPLUG_EDITOR=1
 
+# Agent bridge (WebMCP) exports, on by default; build with IPLUG_WEBMCP=0 to omit
+IPLUG_WEBMCP ?= 1
+ifneq ($(IPLUG_WEBMCP),0)
+WEB_CFLAGS += -DIPLUG_WEBMCP=1
+WEB_WEBMCP_EXPORTS = , '_iplug_webmcp_version', '_iplug_webmcp_num_graphics', '_iplug_webmcp_get_graphics', '_iplug_webmcp_last_error', '_iplug_webmcp_live_edit_available', '_iplug_webmcp_get_ui_tree', '_iplug_webmcp_get_control', '_iplug_webmcp_set_control_value', '_iplug_webmcp_set_control_default', '_iplug_webmcp_set_control_hidden', '_iplug_webmcp_set_control_disabled', '_iplug_webmcp_set_control_text', '_iplug_webmcp_set_control_prop', '_iplug_webmcp_set_control_bounds', '_iplug_webmcp_set_background_color', '_iplug_webmcp_mouse', '_iplug_webmcp_wheel', '_iplug_webmcp_key', '_iplug_webmcp_flush_draw'
+endif
+
 WAM_EXPORTS = "[\
   '_malloc', '_free', '_createModule','_wam_init','_wam_terminate','_wam_resize', \
   '_wam_onprocess', '_wam_onmidi', '_wam_onsysex', '_wam_onparam', \
   '_wam_onmessageN', '_wam_onmessageS', '_wam_onmessageA', '_wam_onpatch' \
   ]"
 
-WEB_EXPORTS = "['_malloc', '_free', '_main', '_iplug_fsready', '_iplug_syncfs', '_iplug_popup_menu_selected']"
+WEB_EXPORTS = "['_malloc', '_free', '_main', '_iplug_fsready', '_iplug_syncfs', '_iplug_popup_menu_selected'$(WEB_WEBMCP_EXPORTS)]"
 
 # LDFLAGS for both WAM and WEB targets
 LDFLAGS = -s ALLOW_MEMORY_GROWTH=1 --bind

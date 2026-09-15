@@ -462,9 +462,59 @@
       const next = !this.liveEditActive;
       if (!this.options.setLiveEditEnabled(next)) return;
 
-      this.liveEditActive = next;
-      this.liveEditBtn.setAttribute('aria-pressed', String(next));
-      this.liveEditBtn.classList.toggle('active', next);
+      this.setLiveEditActive(next);
+    }
+
+    /** Sync the footer's live edit button to a state set elsewhere (e.g. by the agent bridge) */
+    setLiveEditActive(active) {
+      this.liveEditActive = Boolean(active);
+      this.liveEditBtn.setAttribute('aria-pressed', String(this.liveEditActive));
+      this.liveEditBtn.classList.toggle('active', this.liveEditActive);
+    }
+
+    /** Plain snapshot of the footer state, consumed by the agent bridge (IPlugWasmWebMCP.js) */
+    getHostState() {
+      return {
+        plugin: this.options.pluginName,
+        ready: !this.startBtn.disabled,
+        audioEnabled: this.audioStarted,
+        audioContextState: this.audioContext?.state || 'uninitialized',
+        sampleRate: this.audioContext?.sampleRate || null,
+        source: this.sourceSelect.value,
+        gainPercent: Number(this.gainSlider.value),
+        waveform: this.waveformSelect.value,
+        frequencyLeft: Number(this.freqL.value),
+        frequencyRight: Number(this.freqR.value),
+        frequenciesLinked: this.freqLinked,
+        noiseType: this.noiseTypeSelect?.value || 'white',
+        fileLoaded: Boolean(this.audioBuffer),
+        liveEditAvailable: this.options.isLiveEditAvailable ? Boolean(this.options.isLiveEditAvailable()) : false,
+        liveEditActive: this.liveEditActive
+      };
+    }
+
+    /**
+     * Apply footer source settings programmatically (already validated by the caller).
+     * Accepts any subset of: source ('none'|'tone'|'noise'|'file'), gainPercent,
+     * waveform, frequencyLeft, frequencyRight, noiseType. Explicit per-channel
+     * frequencies unlink the channels, as editing the footer sliders would.
+     */
+    async applySourceSettings(settings = {}) {
+      this.stopCurrentSource();
+      if ('source' in settings) this.sourceSelect.value = settings.source;
+      if ('gainPercent' in settings) this.gainSlider.value = settings.gainPercent;
+      if ('waveform' in settings) this.waveformSelect.value = settings.waveform;
+      if ('noiseType' in settings && this.noiseTypeSelect) this.noiseTypeSelect.value = settings.noiseType;
+      if ('frequencyLeft' in settings || 'frequencyRight' in settings) {
+        this.linkCheck.checked = this.freqLinked = false;
+        if ('frequencyLeft' in settings) this.applyFrequency('left', settings.frequencyLeft);
+        if ('frequencyRight' in settings) this.applyFrequency('right', settings.frequencyRight);
+      }
+      this.updateGain();
+      this.updateSourceControls();
+      if (this.audioStarted) await this.startCurrentSource();
+      this.savePreferences();
+      return this.getHostState();
     }
 
     loadPreferences() {

@@ -8,6 +8,7 @@
  ==============================================================================
 */
 
+#include <algorithm>
 #include <cstring>
 #include <cstdio>
 #include <cstdint>
@@ -15,25 +16,36 @@
 #include <vector>
 
 #include "IGraphicsWeb.h"
+#include "IGraphicsJSON.h"
 
-EM_JS(int, iplug_wasm_capture_bridge_enabled, (), {
-  if (typeof window === "undefined") return 0;
-  try {
-    return new URLSearchParams(window.location.search).get("iplugWasmCapture") === "1";
-  } catch (e) {
-    return 0;
+// Whether the WebGL context should keep its drawing buffer after presenting,
+// which is what lets canvas.toDataURL() capture the rendered UI. Resolution
+// order: Module.iplugPreserveDrawingBuffer (host page override), then the
+// ?iplugWasmCapture=1 URL flag, then the build default (on for IPLUG_WEBMCP
+// builds so agents can take screenshots, off otherwise because it costs one
+// extra blit per presented frame).
+EM_JS(int, iplug_wasm_preserve_drawing_buffer, (int defaultOn), {
+  if (typeof Module !== "undefined" && typeof Module.iplugPreserveDrawingBuffer === "boolean") {
+    return Module.iplugPreserveDrawingBuffer ? 1 : 0;
   }
+  if (typeof window === "undefined") return defaultOn;
+  try {
+    if (new URLSearchParams(window.location.search).get("iplugWasmCapture") === "1") return 1;
+  } catch (e) {}
+  return defaultOn;
 });
 
+#if defined(IPLUG_WEBMCP)
+  #define IPLUG_WASM_PRESERVE_DRAWING_BUFFER_DEFAULT 1
+#else
+  #define IPLUG_WASM_PRESERVE_DRAWING_BUFFER_DEFAULT 0
+#endif
+
 // Helper to create WebGL context for Shadow DOM (CSS selectors don't work).
-EM_JS(int, createWebGLContextForShadowDOM, (), {
+EM_JS(int, createWebGLContextForShadowDOM, (int preserveDrawingBuffer), {
   var canvas = Module.canvas;
   if (!canvas) return 0;
-  var preserveDrawingBuffer = false;
-  try {
-    preserveDrawingBuffer = new URLSearchParams(window.location.search).get("iplugWasmCapture") === "1";
-  } catch (e) {}
-  var attrs = { stencil: true, depth: true, antialias: true, alpha: true, preserveDrawingBuffer: preserveDrawingBuffer };
+  var attrs = { stencil: true, depth: true, antialias: true, alpha: true, preserveDrawingBuffer: !!preserveDrawingBuffer };
   var ctx = canvas.getContext("webgl", attrs) || canvas.getContext("experimental-webgl", attrs);
   if (!ctx) return 0;
   return GL.registerContext(ctx, attrs);
@@ -509,8 +521,20 @@ using namespace iplug;
 using namespace igraphics;
 using namespace emscripten;
 
-extern std::vector<IGraphicsWeb*> gGraphicsInstances;
-extern void UnregisterGraphicsInstance(IGraphicsWeb* pGraphics);
+// Instance registry for multi-instance support (Shadow DOM / web components).
+// Declared in IGraphics_include_in_plug_src.h; defined here so every build that
+// compiles this file links, plugin or not.
+std::vector<IGraphicsWeb*> gGraphicsInstances;
+
+void RegisterGraphicsInstance(IGraphicsWeb* pGraphics)
+{
+  gGraphicsInstances.push_back(pGraphics);
+}
+
+void UnregisterGraphicsInstance(IGraphicsWeb* pGraphics)
+{
+  gGraphicsInstances.erase(std::remove(gGraphicsInstances.begin(), gGraphicsInstances.end(), pGraphics), gGraphicsInstances.end());
+}
 double gPrevMouseDownTime = 0.;
 bool gFirstClick = false;
 
@@ -991,6 +1015,9 @@ void IGraphicsWeb::RegisterCanvasEvents()
   }
   else
   {
+    // Expose the IGraphics pointer to page scripts (WebMCP bridge) here too
+    mCanvas.set("_iplugGraphics", val(reinterpret_cast<uintptr_t>(this)));
+
     // Regular DOM: use emscripten's callback system
     const char* target = mCanvasSelector.c_str();
     emscripten_set_mousedown_callback(target, this, 1, mouse_callback);
@@ -1040,9 +1067,7 @@ void* IGraphicsWeb::OpenWindow(void* pHandle)
   attr.depth = true;
   attr.antialias = true;
   attr.alpha = true;
-  // Capture is URL opt-in because preserveDrawingBuffer can reduce WebGL
-  // presentation throughput in regular production plugin embeds.
-  attr.preserveDrawingBuffer = iplug_wasm_capture_bridge_enabled();
+  attr.preserveDrawingBuffer = iplug_wasm_preserve_drawing_buffer(IPLUG_WASM_PRESERVE_DRAWING_BUFFER_DEFAULT);
 //  attr.explicitSwapControl = 1;
 
   EMSCRIPTEN_WEBGL_CONTEXT_HANDLE ctx;
@@ -1050,7 +1075,7 @@ void* IGraphicsWeb::OpenWindow(void* pHandle)
   if (mInShadowDOM)
   {
     // Shadow DOM: create context via JS since CSS selectors don't work
-    ctx = createWebGLContextForShadowDOM();
+    ctx = createWebGLContextForShadowDOM(attr.preserveDrawingBuffer ? 1 : 0);
   }
   else
   {
@@ -1301,46 +1326,7 @@ void IGraphicsWeb::CreatePlatformTextEntry(int paramIdx, const IText& text, cons
 
 namespace
 {
-  void AppendJsonString(std::string& out, const char* str)
-  {
-    out.push_back('"');
-
-    if (!str)
-    {
-      out.push_back('"');
-      return;
-    }
-
-    for (const char* p = str; *p; ++p)
-    {
-      const unsigned char c = static_cast<unsigned char>(*p);
-
-      switch (c)
-      {
-        case '\\': out += "\\\\"; break;
-        case '"': out += "\\\""; break;
-        case '\b': out += "\\b"; break;
-        case '\f': out += "\\f"; break;
-        case '\n': out += "\\n"; break;
-        case '\r': out += "\\r"; break;
-        case '\t': out += "\\t"; break;
-        default:
-          if (c < 0x20)
-          {
-            char esc[8];
-            std::snprintf(esc, sizeof(esc), "\\u%04x", c);
-            out += esc;
-          }
-          else
-          {
-            out.push_back(static_cast<char>(c));
-          }
-          break;
-      }
-    }
-
-    out.push_back('"');
-  }
+  // JSON string escaping uses the shared writer helpers (IPlugJSON.h via IGraphicsJSON.h)
 
   std::string GetPopupMenuItemText(IPopupMenu& menu, int itemIdx, IPopupMenu::Item& item)
   {

@@ -27,21 +27,12 @@
   #include <vector>
   #include <algorithm>
 
-  // Instance registry for multi-instance support (Shadow DOM / web components)
-  std::vector<iplug::igraphics::IGraphicsWeb*> gGraphicsInstances;
-
-  void RegisterGraphicsInstance(iplug::igraphics::IGraphicsWeb* pGraphics)
-  {
-    gGraphicsInstances.push_back(pGraphics);
-  }
-
-  void UnregisterGraphicsInstance(iplug::igraphics::IGraphicsWeb* pGraphics)
-  {
-    gGraphicsInstances.erase(
-      std::remove(gGraphicsInstances.begin(), gGraphicsInstances.end(), pGraphics),
-      gGraphicsInstances.end()
-    );
-  }
+  // Instance registry for multi-instance support (Shadow DOM / web components).
+  // Defined in IGraphicsWeb.cpp so that builds which compile IGraphicsWeb.cpp
+  // without an IGraphics plugin (e.g. the WebView UI module) still link.
+  extern std::vector<iplug::igraphics::IGraphicsWeb*> gGraphicsInstances;
+  void RegisterGraphicsInstance(iplug::igraphics::IGraphicsWeb* pGraphics);
+  void UnregisterGraphicsInstance(iplug::igraphics::IGraphicsWeb* pGraphics);
 
   void StartMainLoopTimer()
   {

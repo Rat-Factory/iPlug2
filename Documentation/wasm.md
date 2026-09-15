@@ -186,6 +186,9 @@ The build copies templates from `IPlug/WEB/TemplateWasm/`:
 | `index.html` | Main page with Web Audio setup |
 | `scripts/IPlugWasmBundle.js.template` | Controller class, connects DSP↔UI |
 | `scripts/IPlugWasmProcessor.js.template` | AudioWorkletProcessor wrapper |
+| `scripts/IPlugWasmHostControls.js` | Footer UI: audio start/stop, test signals, MIDI, live edit button (copied verbatim) |
+| `scripts/IPlugWasmWebMCP.js` | WebMCP agent bridge (copied verbatim, see below) |
+| `webview.html` | Host page for WebView (HTML/CSS/JS) UIs |
 | `styles/style.css` | Default styling |
 
 Placeholders like `NAME_PLACEHOLDER` are replaced with the plugin name during build.
@@ -324,6 +327,155 @@ The WASM module code is shared across all instances, but each instance has isola
 Use **WASM Split** for: standalone web plugins, embedding in web apps, simple deployment.
 
 Use **WAM** for: DAW integration, WAM-compatible hosts, standardized plugin format.
+
+## WebMCP Agent Bridge
+
+Every generated host page (`index.html` for IGraphics UIs, `webview.html` for
+WebView UIs) loads `scripts/IPlugWasmWebMCP.js`, which registers a set of
+[WebMCP](https://webmachinelearning.github.io/webmcp/) tools on
+`navigator.modelContext`. A browser agent (for example the built-in browser of
+the Codex app, or Claude Desktop once it supports WebMCP) can then automate the
+plugin without touching canvas pixels: discover and set parameters, snapshot and
+restore the complete plugin state, inspect and manipulate IGraphics controls,
+simulate pointer and keyboard input, take screenshots, and drive WebView UIs.
+
+Nothing is loaded from the network, no extension is required, and browsers
+without WebMCP behave exactly as before. In that case the bridge installs a dev
+shim at `window.__iplugWebMCPShim` with the same `registerTool` contract, so
+the tools can be driven from DevTools or from a browser automation MCP:
+
+```javascript
+__iplugWebMCPShim.list().map(t => t.name);
+await __iplugWebMCPShim.call('iplug_templateproject_get_status', {});
+await __iplugWebMCPShim.call('iplug_templateproject_set_parameter', { paramIdx: 0, normalized: 0.25 });
+```
+
+Add `?iplugWebMCPShim=1` to the URL to force the shim even when the browser has
+WebMCP. Tool names are prefixed with `iplug_<pluginname>_`; a second plugin on
+the same page gets an `_2` suffix. Always discover names through `get_status`
+rather than hard-coding them.
+
+### Readiness model
+
+All tools are registered when the page loads, so they are discoverable before
+audio starts. Execution is gated: a tool that cannot run yet rejects with an
+`Error` whose message ends in a hint and whose `code` is one of `ui-not-ready`,
+`dsp-not-ready`, `live-edit-unavailable`, `screenshot-unavailable`,
+`not-supported`, `invalid-input`, `not-found`, `stale` or `disposed`.
+`get_status` reports the same information up front:
+
+```json
+{
+  "ui":  { "ready": true, "width": 1024, "height": 768, "liveEditAvailable": false, "preserveDrawingBuffer": true },
+  "dsp": { "controllerReady": false, "audioContextState": "uninitialized", "running": false },
+  "capabilities": { "parameters": false, "state": false, "igraphics": true, "pointer": true, "screenshot": true },
+  "tools": [ { "name": "iplug_templateproject_get_parameters", "available": false, "requires": ["dsp"] } ],
+  "hints": [ "Parameter and state tools need the DSP: call set_audio_enabled({enabled:true}) or click Start Audio ..." ]
+}
+```
+
+The DSP worklet only exists once audio has been started. `set_audio_enabled`
+does this, but browser autoplay rules may require a real click first; the tool
+then returns `reason: "autoplay-blocked"` instead of throwing. Mutating tools
+are serialized; read-only tools run immediately.
+
+### Tools
+
+| Tool | Needs | Purpose |
+|------|-------|---------|
+| `get_status` | – | Readiness, capabilities, tool availability, hints |
+| `get_events` | – | Buffered `iplug:live-edit:*`, `iplug:param-changed`, `iplug:audio-state` events (`since`, `types`, `clear`) |
+| `get_host_state`, `set_audio_enabled`, `configure_source` | host page | Footer state, audio start/stop, test signal (tone/noise/file, gain, frequencies) |
+| `get_parameters` | DSP | Index, name, label, group, type, range, step, native `value`, `normalizedValue`, `display`, enum `displayTexts` |
+| `set_parameter`, `set_parameters` | DSP | Exactly one of `normalized` (0–1), `value` (native units) or `text` (display string) per entry; batches are all-or-nothing; returns the quantized result |
+| `reset_parameter` | DSP | One parameter or all of them |
+| `get_state`, `set_state` | DSP | Complete plugin state (`SerializeState`) as base64 |
+| `get_presets`, `restore_preset` | DSP | Factory presets |
+| `get_ui_tree` | IGraphics | Size, scales, background colour and every control: index, stable `tag`, `className`, group, parameter bindings with values and display strings, hidden/disabled, `bounds` and `targetBounds` (logical units), `text`, `label`, `style` |
+| `set_control_value`, `reset_control_value` | IGraphics | Through the control's own user-input path (`SetValueFromUserInput`), so action functions run and the DSP follows |
+| `set_control_hidden`, `set_control_disabled`, `set_control_text`, `set_control_style` | IGraphics | Visibility, enabled state, ITextControl strings / IVectorBase labels, IVStyle colours and flags |
+| `set_control_bounds`, `set_background_color` | IGraphics | Move/resize controls, solid panel background |
+| `undo`, `export_layout` | IGraphics | Undo the last tool-driven change; diff against the state before the first edit as an `iplug-layout-patch` a coding agent can apply to `mLayoutFunc` |
+| `set_layout_editing` | live edit build | Toggle the visual overlay (`IGraphicsLiveEdit`); its changes arrive in `get_events` |
+| `pointer`, `key` | IGraphics | `down`/`up`/`move`/`click`/`drag`/`wheel` in logical units through the real mouse handlers; keys by `KeyboardEvent.key` name |
+| `capture_screenshot` | IGraphics | PNG data URL of the canvas, or of one control (`tag`/`index`) plus `padding` in logical units |
+| `get_webview_controls`, `activate_webview_action` | WebView | `[param-id]` elements, `data-iplug-action` elements and registered actions |
+
+Controls are identified by `tag` (stable, assigned in `AttachControl`) or, as a
+fallback, by runtime `index`. Set values on the DSP with `set_parameter` when you
+only care about the sound; use `set_control_value` when you want the UI control's
+behaviour (action functions, linked controls, gesture messages) exercised too.
+
+### Build switches
+
+The bridge's C++ side lives in `IGraphics/IGraphicsIntrospect.cpp` (platform
+independent) and `IGraphics/Platforms/IGraphicsWebMCP.cpp` (Emscripten
+exports). It is compiled when `IPLUG_WEBMCP` is defined, which is the default for
+Wasm builds:
+
+- CMake: `-DIPLUG2_WASM_WEBMCP=OFF` removes the exports and the C++ code.
+- Makefile: `IPLUG_WEBMCP=0` does the same.
+- `IPLUG_WEBMCP_NO_CLASS_NAME` drops the `className` field (and the demangler).
+- `IPLUG2_WASM_LIVE_EDIT=ON` is only needed for `set_layout_editing`; every
+  other tool, including bounds and style edits, works in ordinary builds.
+
+Screenshots need the WebGL drawing buffer to be preserved. WebMCP builds enable
+this by default; opt out with `<iplug-yourplugin preserve-drawing-buffer="false">`,
+`window.IPlugWasmOptions = { preserveDrawingBuffer: false }` before the bundle
+loads, or the build switches above. Non-WebMCP builds keep the previous
+behaviour (`?iplugWasmCapture=1` turns it on).
+
+The bridge can also be constructed by hand for custom host pages:
+
+```javascript
+const bridge = new IPlugWasmWebMCP({
+  pluginName: 'YourPlugin', backend: 'igraphics',
+  element: document.querySelector('iplug-yourplugin'),
+  hostControls,                                 // optional footer
+  getController: () => pluginElement.controller // optional DSP access
+});
+pluginElement.addEventListener('uiready', () => bridge.refresh());
+pluginElement.addEventListener('audioready', () => bridge.refresh());
+bridge.dispose(); // unregisters everything
+```
+
+### WebView UIs
+
+`webview.html` discovers elements with a `param-id` attribute (light DOM and
+open shadow roots) and clickable elements annotated with a stable
+`data-iplug-action="id"`. For anything asynchronous or with input, register an
+action from the UI's own script:
+
+```javascript
+window.iPlugWebMCP?.registerAction({
+  id: 'reset-gain',
+  label: 'Reset gain to its default',
+  inputSchema: { type: 'object', properties: {} },
+  run: async (input, { signal }) => { SPVFUI(0, 1); return { normalized: 1 }; }
+});
+```
+
+Registered actions take precedence over DOM actions with the same id and are
+cleared whenever a new document is loaded. Parameter values reach WebView
+controls through the normal `SPVFD` path, so `set_parameter` moves the knobs.
+
+### Verifying with a browser automation tool
+
+1. Build a distribution (`cmake --build --preset web --target YourPlugin-wasm-dist`)
+   and serve it with the generated `serve.py` (sends COOP/COEP headers and
+   `Cache-Control: no-store`).
+2. Open the page; call `get_status` through `__iplugWebMCPShim.call(...)` (or
+   through WebMCP) and check the tool list and hints.
+3. Click **Start Audio** once, then `get_parameters`, `set_parameter`,
+   `capture_screenshot`, `get_state` / `set_state`.
+4. `get_ui_tree`, `set_control_value`, `pointer` drags and `set_control_bounds`
+   followed by `undo` and `export_layout`.
+
+Unit tests for the JavaScript side run with:
+
+```sh
+node --test Tests/WebMCP/*.test.cjs
+```
 
 ## See Also
 

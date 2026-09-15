@@ -9,6 +9,7 @@
   <!-- Bundle must load first (initializes Module and web component) -->
   <script src="scripts/NAME_PLACEHOLDER-bundle.js"></script>
   <script src="scripts/IPlugWasmHostControls.js"></script>
+  <script src="scripts/IPlugWasmWebMCP.js"></script>
 
   <!-- Resource data files (fonts, SVGs, images) -->
   <!--FONTS--><script src="scripts/fonts.js"></script>
@@ -54,6 +55,19 @@
       }
     });
 
+    // WebMCP agent bridge: lets a browser agent automate parameters, snapshot
+    // state and inspect/manipulate the IGraphics UI. Tools are registered on
+    // navigator.modelContext when available, otherwise on the dev shim
+    // window.__iplugWebMCPShim (list() / call()).
+    const webmcp = new IPlugWasmWebMCP({
+      pluginName: 'NAME_PLACEHOLDER',
+      backend: 'igraphics',
+      element: pluginElement,
+      hostControls,
+      getController: () => pluginElement.controller
+    });
+    window.iPlugWebMCP = webmcp;
+
     // Plugin parameters (for headless plugins - shown in main body)
     const paramPanel = document.getElementById('paramPanel');
     const mainParams = document.getElementById('mainParams');
@@ -64,6 +78,7 @@
     pluginElement.addEventListener('uiready', (e) => {
       hostControls.setReady(true);
       hostControls.refreshLiveEditAvailability();
+      webmcp.refresh();
 
       if (!e.detail.module) {
         isHeadless = true;
@@ -144,6 +159,7 @@
 
     pluginElement.addEventListener('audioready', (e) => {
       const controller = e.detail.controller;
+      webmcp.refresh();
       if (!controller) return;
 
       controller.on('pluginInfo', (info) => {

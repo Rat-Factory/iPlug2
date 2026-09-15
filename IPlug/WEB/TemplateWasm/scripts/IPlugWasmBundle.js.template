@@ -142,6 +142,10 @@ window.Module = window.Module || {
       this.isInstrument = false;
       this.pluginInfo = null; // Full plugin info from DSP (params, etc.)
 
+      // Pending request/response exchanges with the worklet (see request())
+      this._requests = new Map();
+      this._nextRequestId = 0;
+
       // Legacy callbacks (for backwards compatibility)
       this.onParamChange = null;
       this.onMidiMsg = null;
@@ -273,6 +277,11 @@ window.Module = window.Module || {
 
     _onDSPMessage(e) {
       const msg = e.data;
+
+      if (msg.verb === 'response') {
+        this._settleRequest(msg);
+        return;
+      }
 
       switch (msg.verb) {
         case 'SPVFD': // Send Parameter Value From Delegate
@@ -494,6 +503,95 @@ window.Module = window.Module || {
       this.workletNode?.port.postMessage({ type: 'tick' });
     }
 
+    /**
+     * Send a request to the DSP worklet and await its response. Used by the
+     * agent bridge (IPlugWasmWebMCP.js) for parameter and state operations.
+     * @param {string} op - Operation name handled by the processor's 'request' case
+     * @param {Object} args - Operation arguments
+     * @param {Object} options
+     * @param {AbortSignal} options.signal - Optional cancellation signal
+     * @param {number} options.timeoutMs - Timeout (default 5000; 1500 while the AudioContext is suspended)
+     * @returns {Promise<any>} The response data. Rejections carry an `error.code`:
+     *   'not-ready', 'timeout', 'aborted', 'destroyed', or a code from the processor.
+     */
+    request(op, args = {}, { signal, timeoutMs } = {}) {
+      const fail = (message, code) => {
+        const error = new Error(message);
+        error.code = code;
+        return Promise.reject(error);
+      };
+
+      if (!this.isReady || !this.workletNode) {
+        return fail('Plugin controller is not initialized. Start audio first.', 'not-ready');
+      }
+      if (signal?.aborted) {
+        return fail('Request aborted.', 'aborted');
+      }
+
+      const suspended = this.audioContext?.state !== 'running';
+      const limit = timeoutMs ?? (suspended ? 1500 : 5000);
+      const requestId = ++this._nextRequestId;
+
+      return new Promise((resolve, reject) => {
+        const entry = { resolve, reject, timer: null, onAbort: null, signal };
+        const settle = (fn, value) => {
+          if (!this._requests.has(requestId)) return;
+          this._requests.delete(requestId);
+          clearTimeout(entry.timer);
+          if (entry.onAbort && signal) signal.removeEventListener('abort', entry.onAbort);
+          fn(value);
+        };
+        entry.settle = settle;
+
+        entry.timer = setTimeout(() => {
+          const error = new Error(suspended
+            ? 'DSP request timed out: the AudioContext is not running. Start audio (a user click may be required) and retry.'
+            : 'DSP request timed out.');
+          error.code = 'timeout';
+          settle(reject, error);
+        }, limit);
+
+        if (signal) {
+          entry.onAbort = () => {
+            this.workletNode?.port.postMessage({ type: 'cancel', requestId });
+            const error = new Error('Request aborted.');
+            error.code = 'aborted';
+            settle(reject, error);
+          };
+          signal.addEventListener('abort', entry.onAbort, { once: true });
+        }
+
+        this._requests.set(requestId, entry);
+
+        try {
+          this.workletNode.port.postMessage({ type: 'request', requestId, op, args });
+        } catch (err) {
+          settle(reject, err);
+        }
+      });
+    }
+
+    _settleRequest(msg) {
+      const entry = this._requests.get(msg.requestId);
+      if (!entry) return;
+
+      if (msg.ok) {
+        entry.settle(entry.resolve, msg.data);
+      } else {
+        const error = new Error(msg.error || 'DSP request failed.');
+        error.code = msg.code || 'dsp-error';
+        entry.settle(entry.reject, error);
+      }
+    }
+
+    _rejectPendingRequests(message, code) {
+      for (const entry of [...this._requests.values()]) {
+        const error = new Error(message);
+        error.code = code;
+        entry.settle(entry.reject, error);
+      }
+    }
+
     startAudio() { this.audioContext?.resume(); }
     stopAudio() { this.audioContext?.suspend(); }
     getAudioContext() { return this.audioContext; }
@@ -528,6 +626,7 @@ window.Module = window.Module || {
     }
 
     destroy() {
+      this._rejectPendingRequests('Plugin controller destroyed.', 'destroyed');
       this.workletNode?.disconnect();
       // Only close AudioContext if we created it
       if (this._ownsContext) {
@@ -610,6 +709,15 @@ window.Module = window.Module || {
           progressBar.style.width = `${progress}%`;
         }
       };
+
+      // Screenshot support: keep the WebGL drawing buffer so canvas.toDataURL()
+      // works. Resolution order in C++ (IGraphicsWeb.cpp): this flag, then the
+      // ?iplugWasmCapture=1 URL flag, then the build default (on for WebMCP builds).
+      if (this.hasAttribute('preserve-drawing-buffer')) {
+        mod.iplugPreserveDrawingBuffer = this.getAttribute('preserve-drawing-buffer') !== 'false';
+      } else if (typeof window.IPlugWasmOptions?.preserveDrawingBuffer === 'boolean') {
+        mod.iplugPreserveDrawingBuffer = window.IPlugWasmOptions.preserveDrawingBuffer;
+      }
 
       // Load UI WASM module (only if plugin has IGraphics)
       if (HAS_UI) {
@@ -733,7 +841,7 @@ window.Module = window.Module || {
     }
 
     setLiveEditEnabled(enabled) {
-      const pGraphics = this._canvas?._iplugGraphics;
+      const pGraphics = this.graphicsHandle;
       const setLiveEdit = this._uiModule?._iplug_set_live_edit;
 
       if (!pGraphics || typeof setLiveEdit !== 'function') {
@@ -744,7 +852,21 @@ window.Module = window.Module || {
     }
 
     isLiveEditAvailable() {
-      return !!this._canvas?._iplugGraphics && typeof this._uiModule?._iplug_set_live_edit === 'function';
+      return !!this.graphicsHandle && typeof this._uiModule?._iplug_set_live_edit === 'function';
+    }
+
+    /**
+     * The IGraphics* handle used by the agent bridge exports (Module._iplug_webmcp_*).
+     * 0 when the UI module has not created its IGraphics yet.
+     */
+    get graphicsHandle() {
+      const direct = this._canvas?._iplugGraphics;
+      if (direct) return direct;
+      const mod = this._uiModule;
+      if (mod && typeof mod._iplug_webmcp_get_graphics === 'function' && mod._iplug_webmcp_num_graphics?.() > 0) {
+        return mod._iplug_webmcp_get_graphics(0);
+      }
+      return 0;
     }
 
     // Getters

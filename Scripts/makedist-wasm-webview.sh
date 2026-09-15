@@ -151,6 +151,7 @@ sed -i.bak -e "s/NAME_PLACEHOLDER_LC/$PROJECT_NAME_LC/g" -e "s/NAME_PLACEHOLDER/
 
 # Copy shared host controls.
 cp "$IPLUG2_ROOT/IPlug/WEB/TemplateWasm/scripts/IPlugWasmHostControls.js" scripts/IPlugWasmHostControls.js
+cp "$IPLUG2_ROOT/IPlug/WEB/TemplateWasm/scripts/IPlugWasmWebMCP.js" scripts/IPlugWasmWebMCP.js
 
 # Copy and process WebView HTML template.
 cp "$IPLUG2_ROOT/IPlug/WEB/TemplateWasm/webview.html" index.html

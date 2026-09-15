@@ -11,9 +11,14 @@
 #include "IPlugWasmDSP.h"
 
 #include <atomic>
+#include <cmath>
+#include <cstring>
 #include <unordered_map>
 #include <emscripten.h>
 #include <emscripten/bind.h>
+
+#include "IPlugJSON.h"
+#include "wdl_base64.h"
 
 using namespace iplug;
 using namespace emscripten;
@@ -502,39 +507,254 @@ static std::string _getPluginName(int instanceId)
   return pInstance ? pInstance->GetPluginName() : "";
 }
 
+static const char* ParamTypeName(IParam::EParamType type)
+{
+  switch (type)
+  {
+    case IParam::kTypeBool: return "bool";
+    case IParam::kTypeInt: return "int";
+    case IParam::kTypeEnum: return "enum";
+    case IParam::kTypeDouble: return "double";
+    default: return "none";
+  }
+}
+
+static void AppendParamJSON(std::string& json, int idx, const IParam* pParam)
+{
+  bool first = true;
+  WDL_String display;
+  pParam->GetDisplayWithLabel(display);
+
+  json += "{";
+  AppendJsonKey(json, "idx", first); AppendJsonInt(json, idx);
+  AppendJsonKey(json, "id", first); AppendJsonInt(json, idx);
+  AppendJsonKey(json, "name", first); AppendJsonString(json, pParam->GetName());
+  AppendJsonKey(json, "label", first); AppendJsonString(json, pParam->GetLabel());
+  AppendJsonKey(json, "group", first); AppendJsonString(json, pParam->GetGroup());
+  AppendJsonKey(json, "type", first); AppendJsonString(json, ParamTypeName(pParam->Type()));
+  AppendJsonKey(json, "min", first); AppendJsonNumber(json, pParam->GetMin());
+  AppendJsonKey(json, "max", first); AppendJsonNumber(json, pParam->GetMax());
+  AppendJsonKey(json, "default", first); AppendJsonNumber(json, pParam->GetDefault());
+  AppendJsonKey(json, "defaultNormalized", first); AppendJsonNumber(json, pParam->GetDefault(true));
+  AppendJsonKey(json, "step", first); AppendJsonNumber(json, pParam->GetStep());
+  AppendJsonKey(json, "stepped", first); AppendJsonBool(json, pParam->GetStepped());
+  AppendJsonKey(json, "canAutomate", first); AppendJsonBool(json, pParam->GetCanAutomate());
+  AppendJsonKey(json, "meta", first); AppendJsonBool(json, pParam->GetMeta());
+  AppendJsonKey(json, "value", first); AppendJsonNumber(json, pParam->Value());
+  AppendJsonKey(json, "normalizedValue", first); AppendJsonNumber(json, pParam->GetNormalized());
+  AppendJsonKey(json, "display", first); AppendJsonString(json, display.Get());
+
+  const int nDisplayTexts = pParam->NDisplayTexts();
+
+  if (nDisplayTexts > 0)
+  {
+    AppendJsonKey(json, "displayTexts", first);
+    json += "[";
+    for (int i = 0; i < nDisplayTexts; i++)
+    {
+      double value = 0.;
+      const char* text = pParam->GetDisplayTextAtIdx(i, &value);
+      if (i) json += ",";
+      json += "{\"value\":";
+      AppendJsonNumber(json, value);
+      json += ",\"text\":";
+      AppendJsonString(json, text);
+      json += "}";
+    }
+    json += "]";
+  }
+
+  json += "}";
+}
+
 static std::string _getPluginInfoJSON(int instanceId)
 {
   IPlugWasmDSP* pInstance = GetInstance(instanceId);
   if (!pInstance) return "{}";
 
-  std::string json = "{";
-  json += "\"instanceId\":" + std::to_string(instanceId) + ",";
-  json += "\"name\":\"" + std::string(pInstance->GetPluginName()) + "\",";
-  json += "\"numInputChannels\":" + std::to_string(pInstance->GetNumInputChannels()) + ",";
-  json += "\"numOutputChannels\":" + std::to_string(pInstance->GetNumOutputChannels()) + ",";
-  json += "\"isInstrument\":" + std::string(pInstance->IsPlugInstrument() ? "true" : "false") + ",";
-  json += "\"params\":[";
+  std::string json;
+  bool first = true;
+  json += "{";
+  AppendJsonKey(json, "bridgeVersion", first); AppendJsonInt(json, 1);
+  AppendJsonKey(json, "instanceId", first); AppendJsonInt(json, instanceId);
+  AppendJsonKey(json, "name", first); AppendJsonString(json, pInstance->GetPluginName());
+  AppendJsonKey(json, "numInputChannels", first); AppendJsonInt(json, pInstance->GetNumInputChannels());
+  AppendJsonKey(json, "numOutputChannels", first); AppendJsonInt(json, pInstance->GetNumOutputChannels());
+  AppendJsonKey(json, "isInstrument", first); AppendJsonBool(json, pInstance->IsPlugInstrument());
+  AppendJsonKey(json, "numPresets", first); AppendJsonInt(json, pInstance->NPresets());
 
-  int nParams = pInstance->NParams();
+  AppendJsonKey(json, "paramGroups", first);
+  json += "[";
+  for (int i = 0; i < pInstance->NParamGroups(); i++)
+  {
+    if (i) json += ",";
+    AppendJsonString(json, pInstance->GetParamGroupName(i));
+  }
+  json += "]";
+
+  AppendJsonKey(json, "params", first);
+  json += "[";
+  const int nParams = pInstance->NParams();
   for (int i = 0; i < nParams; i++)
   {
-    IParam* pParam = pInstance->GetParam(i);
     if (i > 0) json += ",";
-    json += "{";
-    json += "\"idx\":" + std::to_string(i) + ",";
-    json += "\"id\":" + std::to_string(i) + ",";
-    json += "\"name\":\"" + std::string(pParam->GetName()) + "\",";
-    json += "\"label\":\"" + std::string(pParam->GetLabel()) + "\",";
-    json += "\"min\":" + std::to_string(pParam->GetMin()) + ",";
-    json += "\"max\":" + std::to_string(pParam->GetMax()) + ",";
-    json += "\"default\":" + std::to_string(pParam->GetDefault()) + ",";
-    json += "\"step\":" + std::to_string(pParam->GetStep()) + ",";
-    json += "\"value\":" + std::to_string(pParam->Value());
-    json += "}";
+    AppendParamJSON(json, i, pInstance->GetParam(i));
   }
-
   json += "]}";
   return json;
+}
+
+// --- Agent bridge (WebMCP) helpers ---------------------------------------------------------
+// onParam() above is the UI -> DSP path and deliberately does not echo. These tool-driven
+// setters go through the same SetParameterValue() but echo the resulting (quantized) value
+// back through SendParameterValueFromDelegate so every attached UI follows.
+
+static bool SetParamNormalizedAndEcho(IPlugWasmDSP* pInstance, int paramIdx, double normalized)
+{
+  if (!pInstance || paramIdx < 0 || paramIdx >= pInstance->NParams() || !std::isfinite(normalized))
+    return false;
+
+  normalized = Clip(normalized, 0., 1.);
+
+  ENTER_PARAMS_MUTEX
+  pInstance->SetParameterValue(paramIdx, normalized);
+  LEAVE_PARAMS_MUTEX
+
+  pInstance->SendParameterValueFromDelegate(paramIdx, pInstance->GetParam(paramIdx)->GetNormalized(), true);
+  return true;
+}
+
+static bool _setParamNormalized(int instanceId, int paramIdx, double normalized)
+{
+  return SetParamNormalizedAndEcho(GetInstance(instanceId), paramIdx, normalized);
+}
+
+static bool _setParamFromString(int instanceId, int paramIdx, std::string str)
+{
+  IPlugWasmDSP* pInstance = GetInstance(instanceId);
+
+  if (!pInstance || paramIdx < 0 || paramIdx >= pInstance->NParams())
+    return false;
+
+  const IParam* pParam = pInstance->GetParam(paramIdx);
+  return SetParamNormalizedAndEcho(pInstance, paramIdx, pParam->ToNormalized(pParam->StringToValue(str.c_str())));
+}
+
+static double _paramToNormalized(int instanceId, int paramIdx, double nonNormalizedValue)
+{
+  IPlugWasmDSP* pInstance = GetInstance(instanceId);
+
+  if (!pInstance || paramIdx < 0 || paramIdx >= pInstance->NParams())
+    return -1.;
+
+  return pInstance->GetParam(paramIdx)->ToNormalized(nonNormalizedValue);
+}
+
+static bool _resetParam(int instanceId, int paramIdx)
+{
+  IPlugWasmDSP* pInstance = GetInstance(instanceId);
+
+  if (!pInstance || paramIdx < 0 || paramIdx >= pInstance->NParams())
+    return false;
+
+  return SetParamNormalizedAndEcho(pInstance, paramIdx, pInstance->GetParam(paramIdx)->GetDefault(true));
+}
+
+static std::string _getParamDisplay(int instanceId, int paramIdx)
+{
+  IPlugWasmDSP* pInstance = GetInstance(instanceId);
+
+  if (!pInstance || paramIdx < 0 || paramIdx >= pInstance->NParams())
+    return "";
+
+  WDL_String display;
+  pInstance->GetParam(paramIdx)->GetDisplayWithLabel(display);
+  return display.Get();
+}
+
+/** Serialize the full plugin state (SerializeState) as base64. Empty string on failure. */
+static std::string _serializeState(int instanceId)
+{
+  IPlugWasmDSP* pInstance = GetInstance(instanceId);
+
+  if (!pInstance)
+    return "";
+
+  IByteChunk chunk;
+
+  ENTER_PARAMS_MUTEX
+  const bool ok = pInstance->SerializeState(chunk);
+  LEAVE_PARAMS_MUTEX
+
+  if (!ok || chunk.Size() <= 0)
+    return "";
+
+  std::string encoded;
+  encoded.resize(((chunk.Size() + 2) / 3) * 4 + 1);
+  wdl_base64encode(chunk.GetData(), &encoded[0], chunk.Size());
+  encoded.resize(std::strlen(encoded.c_str()));
+  return encoded;
+}
+
+/** Restore plugin state from base64 (see _serializeState), then push all parameter values to the UI. */
+static bool _unserializeState(int instanceId, std::string base64)
+{
+  IPlugWasmDSP* pInstance = GetInstance(instanceId);
+
+  if (!pInstance || base64.empty())
+    return false;
+
+  IByteChunk chunk;
+  chunk.Resize(static_cast<int>(base64.size()));
+  const int decoded = wdl_base64decode(base64.c_str(), chunk.GetData(), chunk.Size());
+
+  if (decoded <= 0)
+    return false;
+
+  chunk.Resize(decoded);
+
+  ENTER_PARAMS_MUTEX
+  const int pos = pInstance->UnserializeState(chunk, 0);
+  LEAVE_PARAMS_MUTEX
+
+  if (pos < 0)
+    return false;
+
+  pInstance->OnRestoreState();
+  return true;
+}
+
+static int _getNumPresets(int instanceId)
+{
+  IPlugWasmDSP* pInstance = GetInstance(instanceId);
+  return pInstance ? pInstance->NPresets() : 0;
+}
+
+static std::string _getPresetName(int instanceId, int presetIdx)
+{
+  IPlugWasmDSP* pInstance = GetInstance(instanceId);
+
+  if (!pInstance || presetIdx < 0 || presetIdx >= pInstance->NPresets())
+    return "";
+
+  return pInstance->GetPresetName(presetIdx);
+}
+
+static bool _restorePreset(int instanceId, int presetIdx)
+{
+  IPlugWasmDSP* pInstance = GetInstance(instanceId);
+
+  if (!pInstance || presetIdx < 0 || presetIdx >= pInstance->NPresets())
+    return false;
+
+  ENTER_PARAMS_MUTEX
+  const bool ok = pInstance->RestorePreset(presetIdx);
+  LEAVE_PARAMS_MUTEX
+
+  if (ok)
+    pInstance->OnRestoreState();
+
+  return ok;
 }
 
 EMSCRIPTEN_BINDINGS(IPlugWasmDSP) {
@@ -560,4 +780,15 @@ EMSCRIPTEN_BINDINGS(IPlugWasmDSP) {
   function("getParamValue", &_getParamValue);
   function("getPluginName", &_getPluginName);
   function("getPluginInfoJSON", &_getPluginInfoJSON);
+  // Agent bridge (WebMCP)
+  function("setParamNormalized", &_setParamNormalized);
+  function("setParamFromString", &_setParamFromString);
+  function("paramToNormalized", &_paramToNormalized);
+  function("resetParam", &_resetParam);
+  function("getParamDisplay", &_getParamDisplay);
+  function("serializeState", &_serializeState);
+  function("unserializeState", &_unserializeState);
+  function("getNumPresets", &_getNumPresets);
+  function("getPresetName", &_getPresetName);
+  function("restorePreset", &_restorePreset);
 }
