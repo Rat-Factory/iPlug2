@@ -307,19 +307,43 @@ int VoiceAllocator::FindFreeVoiceIndex(int startIndex) const
 
 int VoiceAllocator::FindVoiceIndexToSteal(int64_t sampleTime) const
 {
+  // Rank candidates before falling back to age. Sorting by mLastTriggeredTime
+  // alone takes the OLDEST voice, which is normally the note the player is
+  // still physically holding: a held bass under an arpeggio is the first thing
+  // stolen, while arpeggio voices that have already been released and are
+  // inaudible keep their slots.
+  //
+  // A voice whose note-off has arrived has had its key cleared by StopVoice().
+  // mKey is uint8_t, so that assignment of -1 lands at 255 rather than going
+  // negative — test against the valid MIDI range, not for a negative number.
+  //
+  // Released voices are stolen first, oldest first. A voice the player has not
+  // let go of is taken only when nothing is releasing, which on a full
+  // keyboard is the only remaining option.
   size_t voices = mVoicePtrs.size();
-  int64_t earliestTime = sampleTime;
-  int longestPlayingVoiceIdx = 0;
+  int64_t earliestReleased = sampleTime, earliestHeld = sampleTime;
+  int releasedIdx = -1, heldIdx = -1;
   for(int i=0; i<voices; ++i)
   {
     SynthVoice* pv = mVoicePtrs[i];
-    if(pv->mLastTriggeredTime < earliestTime)
+    const bool released = (pv->mKey > 127);
+    if(released)
     {
-      earliestTime = pv->mLastTriggeredTime;
-      longestPlayingVoiceIdx = i;
+      if(pv->mLastTriggeredTime < earliestReleased)
+      {
+        earliestReleased = pv->mLastTriggeredTime;
+        releasedIdx = i;
+      }
+    }
+    else if(pv->mLastTriggeredTime < earliestHeld)
+    {
+      earliestHeld = pv->mLastTriggeredTime;
+      heldIdx = i;
     }
   }
-  return longestPlayingVoiceIdx;
+  if(releasedIdx >= 0) return releasedIdx;
+  if(heldIdx >= 0) return heldIdx;
+  return 0;
 }
 
 // start a single voice and set its current channel and key.
