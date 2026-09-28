@@ -31,6 +31,10 @@
 #include <CoreFoundation/CoreFoundation.h>
 #elif defined OS_WEB
 #include <emscripten/html5.h>
+#elif defined OS_LINUX
+#include <thread>
+#include <atomic>
+#include <chrono>
 #endif
 
 BEGIN_IPLUG_NAMESPACE
@@ -94,6 +98,23 @@ public:
 private:
   long ID = 0;
   ITimerFunction mTimerFunc;
+};
+#elif defined OS_LINUX
+// A plain thread that sleeps for the interval and calls back. Unlike the
+// macOS run-loop timer this fires on its own thread, which suits a headless
+// host (no UI thread to collide with); a windowed Linux host would want to
+// marshal it onto its event loop.
+class Timer_impl : public Timer
+{
+public:
+  Timer_impl(ITimerFunction func, uint32_t intervalMs);
+  ~Timer_impl();
+  void Stop() override;
+private:
+  ITimerFunction mTimerFunc;
+  uint32_t mIntervalMs;
+  std::thread mThread;
+  std::atomic<bool> mRunning{false};
 };
 #else
   #error NOT IMPLEMENTED

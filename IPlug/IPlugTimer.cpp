@@ -116,6 +116,40 @@ void CALLBACK Timer_impl::TimerProc(HWND hwnd, UINT uMsg, UINT_PTR idEvent, DWOR
     }
   }
 }
+#elif defined OS_LINUX
+
+Timer* Timer::Create(ITimerFunction func, uint32_t intervalMs)
+{
+  return new Timer_impl(func, intervalMs);
+}
+
+Timer_impl::Timer_impl(ITimerFunction func, uint32_t intervalMs)
+: mTimerFunc(func)
+, mIntervalMs(intervalMs)
+{
+  mRunning = true;
+  mThread = std::thread([this]() {
+    while (mRunning.load(std::memory_order_relaxed))
+    {
+      std::this_thread::sleep_for(std::chrono::milliseconds(mIntervalMs));
+      if (mRunning.load(std::memory_order_relaxed))
+        mTimerFunc(*this);
+    }
+  });
+}
+
+Timer_impl::~Timer_impl()
+{
+  Stop();
+}
+
+void Timer_impl::Stop()
+{
+  mRunning = false;
+  if (mThread.joinable())
+    mThread.join();
+}
+
 #elif defined OS_WEB
 Timer* Timer::Create(ITimerFunction func, uint32_t intervalMs)
 {

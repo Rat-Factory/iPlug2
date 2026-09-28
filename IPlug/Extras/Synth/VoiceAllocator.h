@@ -16,6 +16,8 @@
  */
 
 #include <array>
+#include <climits>
+#include <memory>
 #include <vector>
 #include <stdint.h>
 #include <functional>
