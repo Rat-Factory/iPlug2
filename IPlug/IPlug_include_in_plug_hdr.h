@@ -45,6 +45,10 @@
   #include "IPlugAPP.h"
   #define PLUGIN_API_BASE IPlugAPP
   #define API_EXT "app"
+#elif defined HEADLESS_API
+  #include "IPlugHeadless.h"
+  #define PLUGIN_API_BASE IPlugHeadless
+  #define API_EXT "app"
 #elif defined WAM_API
   #include "IPlugWAM.h"
   #define PLUGIN_API_BASE IPlugWAM

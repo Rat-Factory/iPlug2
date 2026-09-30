@@ -385,6 +385,7 @@ public:
   void PrintParamValues();
 
   friend class IPlugAPP;
+  friend class IPlugHeadless;
   friend class IPlugAAX;
   friend class IPlugVST2;
   friend class IPlugVST3;

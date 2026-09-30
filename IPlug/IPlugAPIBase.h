@@ -214,6 +214,7 @@ private:
   void OnTimer(Timer& t);
 
   friend class IPlugAPP;
+  friend class IPlugHeadless;
   friend class IPlugAAX;
   friend class IPlugAU;
   friend class IPlugAUv3;
