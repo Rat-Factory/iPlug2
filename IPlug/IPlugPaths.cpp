@@ -19,6 +19,12 @@
 
 #if defined OS_WEB
 #include <emscripten/val.h>
+#elif defined OS_LINUX
+#include <climits>
+#include <cstdlib>
+#include <cstring>
+#include <strings.h>
+#include <unistd.h>
 #elif defined OS_WIN
 #include <windows.h>
 #include <Shlobj.h>
@@ -230,6 +236,170 @@ const void* LoadWinResource(const char* resid, const char* type, int& sizeInByte
     sizeInBytes = size;
     return pResourceData;
   }
+}
+
+#elif defined OS_LINUX
+#pragma mark - OS_LINUX
+
+// Plain POSIX / XDG paths. Nothing here depends on a desktop session, so an
+// embedded (headless) host gets the same answers as a desktop one.
+
+static void GetEnvOrHome(WDL_String& path, const char* envVar, const char* homeSuffix)
+{
+  const char* env = envVar ? getenv(envVar) : nullptr;
+
+  if (env && *env)
+  {
+    path.Set(env);
+    return;
+  }
+
+  const char* home = getenv("HOME");
+  path.Set(home && *home ? home : "/tmp");
+
+  if (homeSuffix && *homeSuffix)
+    path.Append(homeSuffix);
+}
+
+void HostPath(WDL_String& path, const char* bundleID)
+{
+  char buf[PATH_MAX + 1];
+  const ssize_t n = readlink("/proc/self/exe", buf, PATH_MAX);
+
+  if (n > 0)
+  {
+    buf[n] = '\0';
+    path.Set(buf);
+  }
+  else
+    path.Set("");
+}
+
+void PluginPath(WDL_String& path, PluginIDType pExtra)
+{
+  HostPath(path);
+}
+
+void BundleResourcePath(WDL_String& path, PluginIDType pExtra)
+{
+  // <dir of the executable>/resources, the layout the appliance installer uses
+  WDL_String exe;
+  HostPath(exe);
+
+  if (exe.GetLength())
+  {
+    const char* file = exe.get_filepart();
+    const int dirLen = static_cast<int>(file - exe.Get());
+    path.Set(exe.Get(), dirLen > 0 ? dirLen : 1);
+    if (dirLen == 0)
+      path.Set("./");
+    path.Append("resources");
+  }
+  else
+    path.Set("");
+}
+
+void DesktopPath(WDL_String& path)
+{
+  GetEnvOrHome(path, "XDG_DESKTOP_DIR", "/Desktop");
+}
+
+void UserHomePath(WDL_String& path)
+{
+  GetEnvOrHome(path, nullptr, nullptr);
+}
+
+void AppSupportPath(WDL_String& path, bool isSystem)
+{
+  if (isSystem)
+    path.Set("/usr/local/share");
+  else
+    GetEnvOrHome(path, "XDG_DATA_HOME", "/.local/share");
+}
+
+void VST3PresetsPath(WDL_String& path, const char* mfrName, const char* pluginName, bool isSystem)
+{
+  if (isSystem)
+    path.Set("/usr/share/vst3/presets");
+  else
+    GetEnvOrHome(path, nullptr, "/.vst3/presets");
+
+  path.AppendFormatted(PATH_MAX, "/%s/%s", mfrName, pluginName);
+}
+
+void INIPath(WDL_String& path, const char* pluginName)
+{
+  GetEnvOrHome(path, "XDG_CONFIG_HOME", "/.config");
+  path.AppendFormatted(PATH_MAX, "/%s", pluginName);
+}
+
+void WebViewCachePath(WDL_String& path)
+{
+  GetEnvOrHome(path, "XDG_CACHE_HOME", "/.cache");
+}
+
+EResourceLocation LocateResource(const char* name, const char* type, WDL_String& result, const char*, void*, const char* sharedResourcesSubPath)
+{
+  if (CStringHasContents(name))
+  {
+    // 1. an absolute or cwd-relative path that exists
+    if (access(name, R_OK) == 0)
+    {
+      result.Set(name);
+      return EResourceLocation::kAbsolutePath;
+    }
+
+    // 2. <bundle resources>/<subdir by type>/<file>, then <bundle resources>/<file>
+    WDL_String base;
+    BundleResourcePath(base);
+    WDL_String path(name);
+    const char* file = path.get_filepart();
+    const char* sub = "";
+
+    if (type && (strcasecmp(type, "png") == 0 || strcasecmp(type, "svg") == 0 || strcasecmp(type, "jpg") == 0 || strcasecmp(type, "jpeg") == 0))
+      sub = "img/";
+    else if (type && (strcasecmp(type, "ttf") == 0 || strcasecmp(type, "otf") == 0))
+      sub = "fonts/";
+
+    WDL_String candidate;
+    candidate.SetFormatted(PATH_MAX, "%s/%s%s", base.Get(), sub, file);
+
+    if (access(candidate.Get(), R_OK) == 0)
+    {
+      result.Set(candidate.Get());
+      return EResourceLocation::kAbsolutePath;
+    }
+
+    candidate.SetFormatted(PATH_MAX, "%s/%s", base.Get(), file);
+
+    if (access(candidate.Get(), R_OK) == 0)
+    {
+      result.Set(candidate.Get());
+      return EResourceLocation::kAbsolutePath;
+    }
+
+    // 3. shared resources under $XDG_DATA_HOME
+    if (CStringHasContents(sharedResourcesSubPath))
+    {
+      WDL_String shared;
+      AppSupportPath(shared);
+      candidate.SetFormatted(PATH_MAX, "%s/%s/%s", shared.Get(), sharedResourcesSubPath, file);
+
+      if (access(candidate.Get(), R_OK) == 0)
+      {
+        result.Set(candidate.Get());
+        return EResourceLocation::kAbsolutePath;
+      }
+    }
+  }
+
+  return EResourceLocation::kNotFound;
+}
+
+const void* LoadWinResource(const char* resid, const char* type, int& sizeInBytes, void* pHInstance)
+{
+  sizeInBytes = 0;
+  return nullptr;
 }
 
 #elif defined OS_WEB
