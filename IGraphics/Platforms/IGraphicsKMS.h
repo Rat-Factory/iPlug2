@@ -259,5 +259,20 @@ private:
   Stats mStats;
 };
 
+/** IGRAPHICS_KMS_MODULE: IGraphicsKMS, IGraphicsNanoVG and NanoVG are built into a shared object of
+ * their own, which the program loads at run time (dlopen), so the binary itself has no link-time
+ * dependency on libEGL, libGLESv2, libgbm or libdrm and starts (and plays) without them. The binary
+ * keeps the rest of IGraphics (and exports it for the module); MakeGraphics() calls the factory the
+ * program installs here once the module is loaded, and returns nullptr until then (OpenWindow() then
+ * fails cleanly). The module and the binary must come from the same build: the same iPlug2 commit and
+ * the same IGRAPHICS_* defines (the C++ ABI between them is the IGraphics class layout).
+ * Without IGRAPHICS_KMS_MODULE nothing changes: MakeGraphics() constructs an IGraphicsKMS directly. */
+using IGraphicsKMSFactory = IGraphics* (*)(IGEditorDelegate& dlg, int w, int h, int fps, float scale);
+inline IGraphicsKMSFactory& IGraphicsKMSModuleFactory()
+{
+  static IGraphicsKMSFactory sFactory = nullptr;
+  return sFactory;
+}
+
 END_IGRAPHICS_NAMESPACE
 END_IPLUG_NAMESPACE
