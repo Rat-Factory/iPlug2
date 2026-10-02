@@ -29,6 +29,10 @@
 
 #include "SynthVoice.h"
 
+/** Defined when VoiceAllocator has SetVoiceRenderer() (Rat Factory fork), so a
+ consumer can build against trees with and without it. */
+#define IPLUG_VOICE_ALLOCATOR_VOICE_RENDERER 1
+
 BEGIN_IPLUG_NAMESPACE
 
 using namespace voiceControlNames;
@@ -139,6 +143,20 @@ public:
 
   void ProcessVoices(sample** inputs, sample** outputs, int nInputs, int nOutputs, int startIndex, int blockSize);
 
+  /** An optional replacement for the voice loop in ProcessVoices(), e.g. to
+   render the voices of one synth on more than one thread. When set, it is
+   called once per sub-block, on the audio thread, in place of the built-in
+   loop, with every voice (busy or not) in allocation order and the arguments
+   ProcessVoices() received. It must render each busy voice exactly once
+   (ProcessSamplesAccumulating(), or the same sum into outputs) and return only
+   when all of them have finished: the allocator applies the next sub-block's
+   events as soon as it returns.
+   Set it while no block is being processed (before audio starts, or from the
+   audio thread between blocks); nullptr restores the built-in loop. */
+  using VoiceRenderFn = void (*)(void* ctx, SynthVoice* const* voices, int nVoices, sample** inputs, sample** outputs,
+                                 int nInputs, int nOutputs, int startIndex, int blockSize);
+  void SetVoiceRenderer(VoiceRenderFn fn, void* ctx) { mVoiceRenderCtx = ctx; mVoiceRenderFn = fn; }
+
   size_t GetNVoices() const {return mVoicePtrs.size();}
   SynthVoice* GetVoice(int voiceIndex) const {return mVoicePtrs[voiceIndex];}
   void SetPitchOffset(float offset) { mPitchOffset = offset; }
@@ -169,6 +187,8 @@ private:
   IPlugQueue<VoiceInputEvent> mInputQueue{1024};
 
   std::vector<SynthVoice*> mVoicePtrs;
+  VoiceRenderFn mVoiceRenderFn = nullptr;
+  void* mVoiceRenderCtx = nullptr;
   std::vector<std::unique_ptr<VoiceControlRamps>> mVoiceGlides;
   std::vector<int> mHeldKeys; // The currently physically held keys on the keyboard
   std::vector<int> mSustainedNotes; // Any notes that are sustained, including those that are physically held
