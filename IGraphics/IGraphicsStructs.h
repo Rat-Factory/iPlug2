@@ -1948,48 +1948,40 @@ private:
   /** Shrinks a rectangle by removing the intersection area
    * @param r The original rectangle
    * @param i The intersection rectangle to remove
-   * @return The remaining portion of the original rectangle */
+   * @return The remaining portion of the original rectangle (a second portion, when the intersection
+   * crosses the middle of the rectangle, is added to the list) */
   IRECT Shrink(const IRECT &r, const IRECT &i)
   {
-    if (i.L != r.L)
-      return IRECT(r.L, r.T, i.L, r.B);
-    if (i.T != r.T)
-      return IRECT(r.L, r.T, r.R, i.T);
-    if (i.R != r.R)
-      return IRECT(i.R, r.T, r.R, r.B);
-    return IRECT(r.L, i.B, r.R, r.B);
+    return Subtract(r, i);
   }
-  
-  /** Splits a rectangle around an intersection, adding one part to the list
+
+  /** Splits a rectangle around an intersection, adding the other parts to the list
    * @param r The rectangle to split
    * @param i The intersection rectangle
-   * @return The remaining portion after adding the split part to the list */
+   * @return The remaining portion after adding the split parts to the list */
   IRECT Split(const IRECT r, const IRECT &i)
   {
-    if (r.L == i.L)
-    {
-      if (r.T == i.T)
-      {
-        Add(IRECT(i.R, r.T, r.R, i.B));
-        return IRECT(r.L, i.B, r.R, r.B);
-      }
-      else
-      {
-        Add(IRECT(r.L, r.T, r.R, i.T));
-        return IRECT(i.R, i.T, r.R, r.B);
-      }
-    }
-    
-    if (r.T == i.T)
-    {
-      Add(IRECT(r.L, r.T, i.L, i.B));
-      return IRECT(r.L, i.B, r.R, r.B);
-    }
-    else
-    {
-      Add(IRECT(r.L, r.T, r.R, i.T));
-      return IRECT(r.L, i.T, i.L, r.B);
-    }
+    return Subtract(r, i);
+  }
+
+  /** The area of r outside i, where i lies within r and is not all of r: up to four rectangles (above
+   * and below i at r's full width, left and right of i at i's height). The first is returned, the others
+   * are added to the list. Together they cover r minus i exactly: the area of r that the other rectangle
+   * does not cover is kept, wherever i lies inside r (the previous Shrink / Split assumed i touched r's
+   * left or top edge, or both of two opposite edges, and dropped the rest: dirty areas went undrawn) */
+  IRECT Subtract(const IRECT r, const IRECT i)
+  {
+    if (i.Empty()) // touching edges: nothing shared
+      return r;
+    IRECT pieces[4];
+    int n = 0;
+    if (i.T > r.T) pieces[n++] = IRECT(r.L, r.T, r.R, i.T);
+    if (i.B < r.B) pieces[n++] = IRECT(r.L, i.B, r.R, r.B);
+    if (i.L > r.L) pieces[n++] = IRECT(r.L, i.T, i.L, i.B);
+    if (i.R < r.R) pieces[n++] = IRECT(i.R, i.T, r.R, i.B);
+    for (int k = 1; k < n; k++)
+      Add(pieces[k]);
+    return n ? pieces[0] : IRECT();
   }
   
   WDL_TypedBuf<IRECT> mRects;
