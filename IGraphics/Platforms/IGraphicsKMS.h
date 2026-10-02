@@ -28,12 +28,19 @@
  *
  * There is no event loop: the program that owns the process calls PollInput() and
  * RenderFrame() from its main loop (the appliance's main loop, or a test driver).
+ *
+ * Frame pacing (kms): by default a frame's page flip is queued and RenderFrame() returns
+ * without waiting for it, so the CPU work of the next frame overlaps the GPU work and scan-out
+ * of this one; the flip is waited for just before the next one is queued. Config::maxFps caps
+ * the frame rate: RenderFrame() returns 0 before the next frame is due and leaves what is dirty
+ * for the call that is (SecondsToNextFrame() tells the owner's loop how long it may sleep).
  */
 
 #include "IGraphics_select.h"
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 struct gbm_device;
 struct gbm_surface;
@@ -62,6 +69,17 @@ public:
     std::string touchDevice;                      // evdev node ("" = none, "auto" = first INPUT_PROP_DIRECT device)
     bool touchSwapXY = false, touchInvertX = false, touchInvertY = false;
     bool logInput = false;                        // one stderr line per dispatched touch event
+    double maxFps = 0.;                           // > 0: frames start at most this often (dropped, not queued)
+    bool overlap = true;                          // kms: queue the flip and return (CPU / GPU overlap)
+    bool gpuTiming = false;                       // glFinish after the panel and after the present:
+                                                  // per-stage GPU times (serialises CPU and GPU; diagnostic)
+    bool hwScissor = true;                        // NanoVG's draw calls also clipped by the GL scissor
+                                                  // (false: shader clipping only, as upstream; diagnostic)
+    bool partialPresent = false;                  // present only what changed (EGL_EXT_buffer_age), the rest
+                                                  // of the surface kept: ~55 % less GPU time per small frame on
+                                                  // the vc4, but the audio threads beside it ran with higher
+                                                  // per-period peaks than with a full present (L9 round 2), so
+                                                  // it is opt-in
   };
   static Config& Settings();
 
@@ -70,10 +88,17 @@ public:
   {
     uint64_t framesPresented = 0;   // RenderFrame() calls that drew and presented
     uint64_t framesSkipped = 0;     // RenderFrame() calls with nothing dirty
+    uint64_t framesDeferred = 0;    // RenderFrame() calls before the next frame was due (maxFps)
     double drawSecs = 0.;           // CPU-side time in IGraphics::Draw (tessellation + GL calls)
     double swapSecs = 0.;           // eglSwapBuffers (incl. GPU wait when the driver blocks)
     double flipWaitSecs = 0.;       // waiting for the page-flip event (vsync), kms only
     double maxFrameSecs = 0.;       // longest single RenderFrame()
+    double panelGpuSecs = 0.;       // gpuTiming: the panel's frame buffer, flushed to done
+    double presentGpuSecs = 0.;     // gpuTiming: the present (matte + panel composited), to done
+    double dirtyArea = 0.;          // sum of the dirty rects' areas as drawn (merged), panel pixels
+    uint64_t dirtyRects = 0;        // dirty rects as drawn (merged)
+    double presentArea = 0.;        // surface pixels presented (matte + composite)
+    uint64_t bufferAge[4] = {};     // frames by back-buffer age: 0 (unknown: full present), 1, 2, 3+
   };
 
   IGraphicsKMS(IGEditorDelegate& dlg, int w, int h, int fps, float scale);
@@ -112,8 +137,22 @@ public:
    * the panel's refresh rate. \return 1 if a frame was presented, 0 if nothing was dirty, -1 on error. */
   int RenderFrame(bool forceAll = false);
 
+  /** Seconds until the next frame is due under Config::maxFps (0 when it is due now). */
+  double SecondsToNextFrame() const;
+
+  /** Waits for a queued page flip, if any (kms, overlap). */
+  void WaitForFlip();
+
   /** Writes the last presented surface (whole screen incl. matte) to a PNG. Call right after RenderFrame(). */
   bool SaveScreenshot(const char* path);
+
+  /** Reads the panel's own frame buffer (Width x Height at the draw scale, RGBA, top row first) as
+   * it is now, without drawing: what partial redraws have built up. Tests compare it with a full redraw. */
+  bool ReadPanel(std::vector<uint8_t>& rgba, int& w, int& h);
+
+  /** Reads the whole surface (matte included) as it is now, without drawing. Meaningful in the
+   * surfaceless mode (a pbuffer, never swapped): what partial presents have built up. */
+  bool ReadSurface(std::vector<uint8_t>& rgba, int& w, int& h);
 
   /** File descriptors for the owner's poll(): the touch device (-1 if none). */
   int TouchFD() const { return mTouchFD; }
@@ -137,6 +176,8 @@ public:
 protected:
   IPopupMenu* CreatePlatformPopupMenu(IPopupMenu& menu, const IRECT bounds, bool& isAsync) override { isAsync = false; return nullptr; }
   void CreatePlatformTextEntry(int paramIdx, const IText& text, const IRECT& bounds, int length, const char* str) override {}
+
+  void OnPanelFlushed() override;
 
 private:
   PlatformFontPtr LoadPlatformFont(const char* fontID, const char* fileNameOrResID) override;
@@ -166,6 +207,17 @@ private:
   gbm_device* mGBM = nullptr;
   gbm_surface* mGBMSurface = nullptr;
   gbm_bo* mFrontBO = nullptr;   // on screen
+  gbm_bo* mPendingBO = nullptr; // flip queued, not yet on screen
+  double mNextFrameAt = 0.;     // maxFps: the earliest start of the next frame
+  double mFrameGpuWait = 0.;    // gpuTiming: glFinish time inside this frame's Draw()
+  bool mHasBufferAge = false;   // EGL_EXT_buffer_age
+  static constexpr int kPresentHistory = 4;
+  IRECT mPresentHistory[kPresentHistory]; // what the last frames changed, surface pixels, newest first
+  int mPresentHistoryN = 0;
+
+  /** The surface region this frame must present: its dirty rects in surface pixels, plus what the
+   * frames since this back buffer was last on screen changed (buffer age). Empty: everything. */
+  IRECT PresentRegionFor(const IRECTList& panelRects);
   void* mEGLDisplay = nullptr;
   void* mEGLContext = nullptr;
   void* mEGLSurface = nullptr;

@@ -32,6 +32,15 @@ enum NVGcreateFlags {
 	NVG_STENCIL_STROKES	= 1<<1,
 	// Flag indicating that additional debug checks are done.
 	NVG_DEBUG 			= 1<<2,
+	// Flag indicating that each draw call is also clipped by the GL scissor test to the bounding
+	// box of its NanoVG scissor (plus a margin for the scissor's soft edge). NanoVG clips in the
+	// fragment shader, so without this a shape that is mostly outside the scissor (a full-window
+	// background drawn for a small dirty rect) is still rasterised in full; with it the GPU only
+	// touches the scissored pixels, and tilers (vc4 / Raspberry Pi 3) only load and store the
+	// tiles inside the union of the scissors. Pixels inside the scissor are drawn exactly as
+	// before; outside it, nothing is written (NanoVG's shader writes alpha 0 there, which only
+	// differs for composite operations that clear where the source is transparent).
+	NVG_SCISSOR_HW		= 1<<3,
 };
 
 #if defined NANOVG_GL2_IMPLEMENTATION
@@ -176,6 +185,7 @@ struct GLNVGcall {
 	int triangleCount;
 	int uniformOffset;
 	GLNVGblend blendFunc;
+	int scissor[4]; // NVG_SCISSOR_HW: x, y, w, h in framebuffer pixels (GL origin); w < 0: none
 };
 typedef struct GLNVGcall GLNVGcall;
 
@@ -232,6 +242,7 @@ struct GLNVGcontext {
 	GLNVGshader shader;
 	GLNVGtexture* textures;
 	float view[2];
+	float devicePxRatio;
 	int ntextures;
 	int ctextures;
 	int textureId;
@@ -1002,10 +1013,40 @@ static void glnvg__setUniforms(GLNVGcontext* gl, int uniformOffset, int image)
 
 static void glnvg__renderViewport(void* uptr, float width, float height, float devicePixelRatio)
 {
-	NVG_NOTUSED(devicePixelRatio);
 	GLNVGcontext* gl = (GLNVGcontext*)uptr;
 	gl->view[0] = width;
 	gl->view[1] = height;
+	gl->devicePxRatio = devicePixelRatio;
+}
+
+// NVG_SCISSOR_HW: the call's NanoVG scissor as a GL scissor box. The box is the scissor's
+// bounding box in framebuffer pixels (the viewport is view * devicePixelRatio, y flipped as the
+// vertex shader flips it), grown by 2 px: NanoVG's shader scissor has a soft edge of half a
+// pixel, so every pixel it can touch lies inside the box.
+static void glnvg__setCallScissor(GLNVGcontext* gl, GLNVGcall* call, NVGscissor* scissor)
+{
+	float hw, hh, r, fbh, x0, x1, y0, y1;
+	const float* t;
+	call->scissor[2] = -1;
+	if ((gl->flags & NVG_SCISSOR_HW) == 0 || scissor->extent[0] < -0.5f || scissor->extent[1] < -0.5f)
+		return;
+	t = scissor->xform;
+	hw = fabsf(t[0]) * scissor->extent[0] + fabsf(t[2]) * scissor->extent[1];
+	hh = fabsf(t[1]) * scissor->extent[0] + fabsf(t[3]) * scissor->extent[1];
+	r = gl->devicePxRatio > 0.0f ? gl->devicePxRatio : 1.0f;
+	fbh = gl->view[1] * r;
+	x0 = floorf((t[4] - hw) * r - 2.0f);
+	x1 = ceilf((t[4] + hw) * r + 2.0f);
+	y0 = floorf(fbh - (t[5] + hh) * r - 2.0f);
+	y1 = ceilf(fbh - (t[5] - hh) * r + 2.0f);
+	if (x0 < 0.0f) x0 = 0.0f;
+	if (y0 < 0.0f) y0 = 0.0f;
+	if (x1 < x0) x1 = x0;
+	if (y1 < y0) y1 = y0;
+	call->scissor[0] = (int)x0;
+	call->scissor[1] = (int)y0;
+	call->scissor[2] = (int)(x1 - x0);
+	call->scissor[3] = (int)(y1 - y0);
 }
 
 static void glnvg__fill(GLNVGcontext* gl, GLNVGcall* call)
@@ -1237,6 +1278,14 @@ static void glnvg__renderFlush(void* uptr)
 
 		for (i = 0; i < gl->ncalls; i++) {
 			GLNVGcall* call = &gl->calls[i];
+			if (gl->flags & NVG_SCISSOR_HW) {
+				if (call->scissor[2] >= 0) {
+					glEnable(GL_SCISSOR_TEST);
+					glScissor(call->scissor[0], call->scissor[1], call->scissor[2], call->scissor[3]);
+				} else {
+					glDisable(GL_SCISSOR_TEST);
+				}
+			}
 			glnvg__blendFuncSeparate(gl,&call->blendFunc);
 			if (call->type == GLNVG_FILL)
 				glnvg__fill(gl, call);
@@ -1253,6 +1302,7 @@ static void glnvg__renderFlush(void* uptr)
 #if defined NANOVG_GL3
 		glBindVertexArray(0);
 #endif
+		glDisable(GL_SCISSOR_TEST);
 		glDisable(GL_CULL_FACE);
 			glBindBuffer(GL_ARRAY_BUFFER, 0);
 		glUseProgram(0);
@@ -1365,6 +1415,7 @@ static void glnvg__renderFill(void* uptr, NVGpaint* paint, NVGcompositeOperation
 	if (call == NULL) return;
 
 	call->type = GLNVG_FILL;
+	glnvg__setCallScissor(gl, call, scissor);
 	call->triangleCount = 4;
 	call->pathOffset = glnvg__allocPaths(gl, npaths);
 	if (call->pathOffset == -1) goto error;
@@ -1445,6 +1496,7 @@ static void glnvg__renderStroke(void* uptr, NVGpaint* paint, NVGcompositeOperati
 	if (call == NULL) return;
 
 	call->type = GLNVG_STROKE;
+	glnvg__setCallScissor(gl, call, scissor);
 	call->pathOffset = glnvg__allocPaths(gl, npaths);
 	if (call->pathOffset == -1) goto error;
 	call->pathCount = npaths;
@@ -1501,6 +1553,7 @@ static void glnvg__renderTriangles(void* uptr, NVGpaint* paint, NVGcompositeOper
 	if (call == NULL) return;
 
 	call->type = GLNVG_TRIANGLES;
+	glnvg__setCallScissor(gl, call, scissor);
 	call->image = paint->image;
 	call->blendFunc = glnvg__blendCompositeOperation(compositeOperation);
 
