@@ -80,6 +80,10 @@ public:
                                                   // the vc4, but the audio threads beside it ran with higher
                                                   // per-period peaks than with a full present (L9 round 2), so
                                                   // it is opt-in
+    bool startHidden = false;                     // kms: open without taking the screen (the CRTC keeps what it
+                                                  // scans out, e.g. the host's own panel on fbdev); SetVisible(true)
+                                                  // takes it. The owner can open the UI early and show it later
+                                                  // without paying EGL, the layout and the first frame again
   };
   static Config& Settings();
 
@@ -136,6 +140,21 @@ public:
    * kms: blocks until the page flip of this frame completes (vsync), so the loop is paced at
    * the panel's refresh rate. \return 1 if a frame was presented, 0 if nothing was dirty, -1 on error. */
   int RenderFrame(bool forceAll = false);
+
+  /** Show or hide the panel (kms: hand the screen back and forth with whatever scanned out before).
+   * Hiding waits for a queued page flip, puts the CRTC back on the frame buffer it scanned out when the
+   * window opened (the console's fbdev buffer, or the host's own panel drawn there) and stops drawing:
+   * RenderFrame() draws nothing and returns 0, the controls keep their state and stay dirty, nothing touches
+   * the GPU. Showing drops the touch events queued meanwhile (and a finger that is still down, until it is
+   * lifted), marks every control dirty, and the next RenderFrame() takes the CRTC with a full frame.
+   * offscreen / surfaceless: only the drawing stops. \return false when the screen could not be handed back. */
+  bool SetVisible(bool visible);
+  bool IsVisible() const { return mVisible; }
+
+  /** Draws every control once into the panel's frame buffer without presenting anything and waits for the
+   * GPU: the shaders, the glyph atlas and the SVGs are ready before the first frame that is shown. For an
+   * owner that opens the UI hidden. */
+  void Prewarm();
 
   /** Seconds until the next frame is due under Config::maxFps (0 when it is due now). */
   double SecondsToNextFrame() const;
@@ -194,8 +213,12 @@ private:
   uint32_t FramebufferForBO(gbm_bo* bo);
   bool OpenTouch(const std::string& path);
   void DispatchTouch();
+  void DrainTouch();
+  bool RestoreSavedCrtc();
 
   bool mWindowOpen = false;
+  bool mVisible = true;          // SetVisible(); false: nothing drawn, the CRTC left to its previous owner
+  bool mSuppressTouch = false;   // after SetVisible(true): ignore a touch that began while hidden, until it lifts
   bool mOffscreen = false;
   bool mSurfaceless = false;
 
