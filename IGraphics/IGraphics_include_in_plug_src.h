@@ -88,6 +88,13 @@
     RegisterGraphicsInstance(pGraphics);
     return pGraphics;
   }
+  #elif defined OS_LINUX && defined IGRAPHICS_KMS && defined IGRAPHICS_KMS_MODULE
+  // IGraphicsKMS lives in a module loaded at run time (IGraphicsKMS.h, IGraphicsKMSModuleFactory)
+  IGraphics* MakeGraphics(IGEditorDelegate& dlg, int w, int h, int fps = 0, float scale = 1.)
+  {
+    IGraphicsKMSFactory factory = IGraphicsKMSModuleFactory();
+    return factory ? factory(dlg, w, h, fps, scale) : nullptr;
+  }
   #elif defined OS_LINUX && defined IGRAPHICS_KMS
   IGraphics* MakeGraphics(IGEditorDelegate& dlg, int w, int h, int fps = 0, float scale = 1.)
   {
