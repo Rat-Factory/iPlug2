@@ -119,6 +119,8 @@ void* IGraphicsKMS::OpenWindow(void* pWindow)
   }
 
   mWindowOpen = true;
+  mVisible = !cfg.startHidden;
+  mSuppressTouch = false;
   mScissorHW = cfg.hwScissor;
   OnViewInitialized(nullptr);   // nvgCreateGLES2 on the current context
   SetScreenScale(1.f);
@@ -134,9 +136,9 @@ void* IGraphicsKMS::OpenWindow(void* pWindow)
   mOffY = cfg.fit ? std::floor((mSurfaceH - panelH) * 0.5f) : 0.f;
   SetPresentTarget(mSurfaceW, mSurfaceH, mOffX, mOffY, cfg.matte);
 
-  fprintf(stderr, "IGraphicsKMS: %s %dx%d, panel %dx%d at scale %.4f -> %.0fx%.0f at (%.0f, %.0f), %s\n",
+  fprintf(stderr, "IGraphicsKMS: %s %dx%d, panel %dx%d at scale %.4f -> %.0fx%.0f at (%.0f, %.0f), %s%s\n",
           mSurfaceless ? "surfaceless" : mOffscreen ? "offscreen" : "kms", mSurfaceW, mSurfaceH, Width(), Height(), mFitScale,
-          panelW, panelH, mOffX, mOffY, cfg.rgb565 ? "RGB565" : "XRGB8888");
+          panelW, panelH, mOffX, mOffY, cfg.rgb565 ? "RGB565" : "XRGB8888", mVisible ? "" : ", hidden (the screen is left as it is)");
   fprintf(stderr, "IGraphicsKMS: GL_RENDERER %s | GL_VERSION %s\n",
           (const char*) glGetString(GL_RENDERER), (const char*) glGetString(GL_VERSION));
 
@@ -421,14 +423,14 @@ void IGraphicsKMS::ShutdownDisplay()
     gbm_surface_release_buffer(mGBMSurface, mPendingBO);
   mPendingBO = nullptr;
 
-  if (mSavedCrtc && mDrmFD >= 0)
+  if (mModeSet)
+    RestoreSavedCrtc();
+  if (mSavedCrtc)
   {
-    auto* c = static_cast<drmModeCrtc*>(mSavedCrtc);
-    if (c->buffer_id)
-      drmModeSetCrtc(mDrmFD, c->crtc_id, c->buffer_id, c->x, c->y, &mConnectorID, 1, &c->mode);
-    drmModeFreeCrtc(c);
+    drmModeFreeCrtc(static_cast<drmModeCrtc*>(mSavedCrtc));
     mSavedCrtc = nullptr;
   }
+  mModeSet = false;
 
   if (mEGLDisplay)
   {
@@ -468,6 +470,89 @@ uint32_t IGraphicsKMS::FramebufferForBO(gbm_bo* bo)
   }
   gbm_bo_set_user_data(bo, reinterpret_cast<void*>(static_cast<uintptr_t>(fb)), DestroyFBCallback);
   return fb;
+}
+
+bool IGraphicsKMS::RestoreSavedCrtc()
+{
+  auto* c = static_cast<drmModeCrtc*>(mSavedCrtc);
+  if (!c || mDrmFD < 0)
+    return false;
+  if (!c->buffer_id)
+  {
+    fprintf(stderr, "IGraphicsKMS: the CRTC scanned out no frame buffer when the window opened; nothing to give it back to\n");
+    return false;
+  }
+  // a legacy SetCrtc is a blocking commit: when it returns, the previous frame buffer is on screen
+  // again (from the next vblank: no tearing) and ours is no longer scanned out
+  if (drmModeSetCrtc(mDrmFD, c->crtc_id, c->buffer_id, c->x, c->y, &mConnectorID, 1, &c->mode))
+  {
+    fprintf(stderr, "IGraphicsKMS: giving the CRTC back failed: %s\n", strerror(errno));
+    return false;
+  }
+  return true;
+}
+
+bool IGraphicsKMS::SetVisible(bool visible)
+{
+  if (!mWindowOpen || visible == mVisible)
+    return true;
+  bool ok = true;
+  if (!visible)
+  {
+    mVisible = false;
+    if (!mOffscreen && mModeSet)
+    {
+      WaitForFlip();
+      ok = RestoreSavedCrtc();
+      mModeSet = false;
+      // nothing scans our buffers out any more: all of them go back to the surface
+      if (mFrontBO && mGBMSurface)
+        gbm_surface_release_buffer(mGBMSurface, mFrontBO);
+      mFrontBO = nullptr;
+    }
+    return ok;
+  }
+  mVisible = true;
+  DrainTouch();
+  // the next frame redraws the whole panel (the controls kept their values while hidden) and, kms, takes
+  // the CRTC with drmModeSetCrtc
+  mNextFrameAt = 0.;
+  mPresentHistoryN = 0;
+  SetAllControlsDirty();
+  return ok;
+}
+
+void IGraphicsKMS::Prewarm()
+{
+  if (!mWindowOpen)
+    return;
+  SetAllControlsDirty();
+  IRECTList rects;
+  IsDirty(rects);
+  SetAllControlsClean();
+  SetPresentRegion(IRECT());
+  Draw(rects);
+  glFinish();
+  // what was drawn went to the window surface's back buffer, never presented; the next shown frame is a
+  // full one either way
+  SetAllControlsDirty();
+}
+
+void IGraphicsKMS::DrainTouch()
+{
+  if (mTouchFD < 0)
+    return;
+  input_event ev[64];
+  while (read(mTouchFD, ev, sizeof(ev)) > 0) {}
+  // where the finger is now: a touch that began while hidden is not a press on this panel
+  unsigned long keys[(KEY_MAX + 8 * sizeof(long)) / (8 * sizeof(long))] = {0};
+  const bool down = ioctl(mTouchFD, EVIOCGKEY(sizeof(keys)), keys) >= 0 && (TestBit(keys, BTN_TOUCH) || TestBit(keys, BTN_LEFT));
+  input_absinfo ax = {}, ay = {};
+  if (ioctl(mTouchFD, EVIOCGABS(mTouchMT ? ABS_MT_POSITION_X : ABS_X), &ax) >= 0) mRawX = ax.value;
+  if (ioctl(mTouchFD, EVIOCGABS(mTouchMT ? ABS_MT_POSITION_Y : ABS_Y), &ay) >= 0) mRawY = ay.value;
+  mTouchDown = mTouchWasDown = down;
+  mTouchMoved = false;
+  mSuppressTouch = down;
 }
 
 void IGraphicsKMS::OnPanelFlushed()
@@ -597,6 +682,8 @@ int IGraphicsKMS::RenderFrame(bool forceAll)
 {
   if (!mWindowOpen)
     return -1;
+  if (!mVisible)
+    return 0; // hidden: nothing drawn, what is dirty stays dirty for the frame that shows the panel again
 
   const double t0 = NowSecs();
   const Config& cfg = Settings();
@@ -719,7 +806,8 @@ bool IGraphicsKMS::SaveScreenshot(const char* path)
   for (size_t i = 3; i < flipped.size(); i += 4)
     flipped[i] = 255;
   const bool ok = stbi_write_png(path, mSurfaceW, mSurfaceH, 4, flipped.data(), static_cast<int>(row)) != 0;
-  Present();
+  if (mVisible)
+    Present(); // hidden: read back only, the screen stays its previous owner's
   return ok;
 }
 
@@ -833,6 +921,11 @@ void IGraphicsKMS::PollInput()
 {
   if (mTouchFD < 0)
     return;
+  if (!mVisible)
+  {
+    DrainTouch(); // the panel is not on screen: its touches are someone else's
+    return;
+  }
   input_event ev[64];
   for (;;)
   {
@@ -866,6 +959,19 @@ void IGraphicsKMS::DispatchTouch()
   if (cfg.touchInvertY) ny = 1.f - ny;
   const float sx = nx * mSurfaceW, sy = ny * mSurfaceH;
   const float x = (sx - mOffX) / mFitScale, y = (sy - mOffY) / mFitScale;
+
+  if (mSuppressTouch)
+  {
+    // a finger that was already down when the panel was shown (it pressed something on the screen that
+    // was there before): nothing until it lifts
+    if (!mTouchDown)
+      mSuppressTouch = false;
+    mTouchWasDown = mTouchDown;
+    mTouchMoved = false;
+    mLastX = x;
+    mLastY = y;
+    return;
+  }
 
   IMouseInfo info;
   info.x = x;
