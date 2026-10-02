@@ -499,6 +499,7 @@ bool IGraphicsKMS::SetVisible(bool visible)
   bool ok = true;
   if (!visible)
   {
+    ReleaseTouchInProgress();
     mVisible = false;
     if (!mOffscreen && mModeSet)
     {
@@ -513,6 +514,7 @@ bool IGraphicsKMS::SetVisible(bool visible)
     return ok;
   }
   mVisible = true;
+  ReleaseMouseCapture(); // nothing from before the panel was hidden still holds the pointer
   DrainTouch();
   // the next frame redraws the whole panel (the controls kept their values while hidden) and, kms, takes
   // the CRTC with drmModeSetCrtc
@@ -553,6 +555,34 @@ void IGraphicsKMS::DrainTouch()
   mTouchDown = mTouchWasDown = down;
   mTouchMoved = false;
   mSuppressTouch = down;
+}
+
+void IGraphicsKMS::ReleaseTouchInProgress()
+{
+  // A control still captured has had its press and not its release: the finger is down (a knob being
+  // turned when the owner hid the panel) or its lift will come while hidden and be drained. The usual
+  // case is the button whose press hid the panel (it acts on mouse down): without a release here it stays
+  // captured, and IGraphics::GetMouseControl() hands every later touch to it, so after one round trip
+  // every tap on the panel pressed that button again. The release goes to the control as a lift at the
+  // last position (a drag ends, the host gets its end-of-gesture); then nothing is captured.
+  if (ControlIsCaptured())
+  {
+    IMouseInfo info;
+    if (mTouchWasDown)
+    {
+      info.x = mLastX;
+      info.y = mLastY;
+    }
+    else
+      GetMouseDownPoint(info.x, info.y);
+    info.ms = IMouseMod(false);
+    OnMouseUp({info});
+    if (Settings().logInput)
+      fprintf(stderr, "touch up   (released on hide) -> ui (%.1f, %.1f)\n", info.x, info.y);
+  }
+  ReleaseMouseCapture();
+  mTouchWasDown = mTouchDown = false;
+  mTouchMoved = false;
 }
 
 void IGraphicsKMS::OnPanelFlushed()
