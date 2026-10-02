@@ -119,6 +119,7 @@ void* IGraphicsKMS::OpenWindow(void* pWindow)
   }
 
   mWindowOpen = true;
+  mScissorHW = cfg.hwScissor;
   OnViewInitialized(nullptr);   // nvgCreateGLES2 on the current context
   SetScreenScale(1.f);
 
@@ -399,6 +400,9 @@ bool IGraphicsKMS::InitEGL(void* nativeDisplay, uint32_t gbmFormat)
     fprintf(stderr, "IGraphicsKMS: eglMakeCurrent failed (0x%x)\n", eglGetError());
     return false;
   }
+  const char* ext = eglQueryString(dpy, EGL_EXTENSIONS);
+  mHasBufferAge = ext && strstr(ext, "EGL_EXT_buffer_age");
+  fprintf(stderr, "IGraphicsKMS: EGL_EXT_buffer_age %s\n", mHasBufferAge ? "yes (partial present)" : "no (full present)");
   return true;
 }
 
@@ -413,6 +417,9 @@ void IGraphicsKMS::ShutdownDisplay()
     if (poll(&pfd, 1, 100) > 0)
       drmHandleEvent(mDrmFD, &ev);
   }
+  if (mPendingBO && mGBMSurface)
+    gbm_surface_release_buffer(mGBMSurface, mPendingBO);
+  mPendingBO = nullptr;
 
   if (mSavedCrtc && mDrmFD >= 0)
   {
@@ -463,6 +470,54 @@ uint32_t IGraphicsKMS::FramebufferForBO(gbm_bo* bo)
   return fb;
 }
 
+void IGraphicsKMS::OnPanelFlushed()
+{
+  if (!Settings().gpuTiming)
+    return;
+  const double t = NowSecs();
+  glFinish();
+  const double dt = NowSecs() - t;
+  mStats.panelGpuSecs += dt;
+  mFrameGpuWait += dt;
+}
+
+void IGraphicsKMS::WaitForFlip()
+{
+  if (!mFlipPending || mDrmFD < 0)
+    return;
+  const double tw = NowSecs();
+  drmEventContext ev = {};
+  ev.version = 2;
+  ev.page_flip_handler = PageFlipHandler;
+  while (mFlipPending)
+  {
+    pollfd pfd = { mDrmFD, POLLIN, 0 };
+    if (poll(&pfd, 1, 1000) <= 0)
+    {
+      fprintf(stderr, "IGraphicsKMS: no page-flip event in 1 s\n");
+      mFlipPending = false;
+      break;
+    }
+    drmHandleEvent(mDrmFD, &ev);
+  }
+  mStats.flipWaitSecs += NowSecs() - tw;
+  // the queued buffer is on screen now: the one it replaced goes back to the surface
+  if (mPendingBO)
+  {
+    if (mFrontBO)
+      gbm_surface_release_buffer(mGBMSurface, mFrontBO);
+    mFrontBO = mPendingBO;
+    mPendingBO = nullptr;
+  }
+}
+
+double IGraphicsKMS::SecondsToNextFrame() const
+{
+  if (Settings().maxFps <= 0.)
+    return 0.;
+  return std::max(0., mNextFrameAt - NowSecs());
+}
+
 bool IGraphicsKMS::Present()
 {
   double t0 = NowSecs();
@@ -471,6 +526,13 @@ bool IGraphicsKMS::Present()
     glFinish();
     mStats.swapSecs += NowSecs() - t0;
     return true;
+  }
+  if (Settings().gpuTiming)
+  {
+    glFinish(); // the present's GPU work (matte + composite) done before the swap
+    const double dt = NowSecs() - t0;
+    mStats.presentGpuSecs += dt;
+    t0 += dt;
   }
   eglSwapBuffers(mEGLDisplay, mEGLSurface);
   if (mOffscreen)
@@ -506,6 +568,9 @@ bool IGraphicsKMS::Present()
   }
   else
   {
+    // One flip may be queued at a time: wait for the previous frame's (with overlap this is
+    // the only wait, and the CPU work of this frame has already run beside it).
+    WaitForFlip();
     mFlipPending = true;
     if (drmModePageFlip(mDrmFD, mCrtcID, fb, DRM_MODE_PAGE_FLIP_EVENT, &mFlipPending))
     {
@@ -514,18 +579,12 @@ bool IGraphicsKMS::Present()
       gbm_surface_release_buffer(mGBMSurface, bo);
       return false;
     }
-    const double tw = NowSecs();
-    drmEventContext ev = {};
-    ev.version = 2;
-    ev.page_flip_handler = PageFlipHandler;
-    while (mFlipPending)
-    {
-      pollfd pfd = { mDrmFD, POLLIN, 0 };
-      if (poll(&pfd, 1, 1000) <= 0)
-        break;
-      drmHandleEvent(mDrmFD, &ev);
-    }
-    mStats.flipWaitSecs += NowSecs() - tw;
+    // The kernel flips once the GPU has finished the buffer (implicit fence) and the next
+    // vblank comes; the buffer goes to mFrontBO in WaitForFlip().
+    mPendingBO = bo;
+    if (!Settings().overlap)
+      WaitForFlip();
+    return true;
   }
 
   if (mFrontBO)
@@ -540,6 +599,13 @@ int IGraphicsKMS::RenderFrame(bool forceAll)
     return -1;
 
   const double t0 = NowSecs();
+  const Config& cfg = Settings();
+  if (cfg.maxFps > 0. && t0 < mNextFrameAt)
+  {
+    // not due yet: what is dirty stays dirty for the frame that is (frames are dropped, never queued)
+    mStats.framesDeferred++;
+    return 0;
+  }
   if (forceAll)
     SetAllControlsDirty();
 
@@ -549,9 +615,25 @@ int IGraphicsKMS::RenderFrame(bool forceAll)
     mStats.framesSkipped++;
     return 0;
   }
+  if (cfg.maxFps > 0.)
+    mNextFrameAt = t0 + 0.95 / cfg.maxFps; // 5 % early: the flip lands on the vblank either way
+  {
+    IRECTList merged; // what Draw() will draw: aligned and merged
+    for (int i = 0; i < rects.Size(); i++)
+      merged.Add(rects.Get(i));
+    merged.PixelAlign(GetBackingPixelScale());
+    merged.Optimize();
+    mStats.dirtyRects += merged.Size();
+    for (int i = 0; i < merged.Size(); i++)
+      mStats.dirtyArea += merged.Get(i).W() * merged.Get(i).H();
+  }
   SetAllControlsClean();
+  mFrameGpuWait = 0.;
+  const IRECT region = PresentRegionFor(rects);
+  SetPresentRegion(region);
+  mStats.presentArea += region.W() > 0.f ? region.W() * region.H() : static_cast<double>(mSurfaceW) * mSurfaceH;
   Draw(rects);
-  mStats.drawSecs += NowSecs() - t0;
+  mStats.drawSecs += NowSecs() - t0 - mFrameGpuWait;
 
   const bool ok = Present();
   const double dt = NowSecs() - t0;
@@ -562,6 +644,57 @@ int IGraphicsKMS::RenderFrame(bool forceAll)
   return 1;
 }
 
+IRECT IGraphicsKMS::PresentRegionFor(const IRECTList& panelRects)
+{
+  // this frame's dirty rects, panel units -> surface pixels, grown to whole pixels plus one
+  IRECT r;
+  const float s = GetDrawScale() * GetScreenScale();
+  for (int i = 0; i < panelRects.Size(); i++)
+  {
+    const IRECT& p = panelRects.Get(i);
+    const IRECT q(std::floor(mOffX + p.L * s) - 1.f, std::floor(mOffY + p.T * s) - 1.f, std::ceil(mOffX + p.R * s) + 1.f, std::ceil(mOffY + p.B * s) + 1.f);
+    r = r.Empty() ? q : r.Union(q);
+  }
+  r = r.Intersect(IRECT(0.f, 0.f, static_cast<float>(mSurfaceW), static_cast<float>(mSurfaceH)));
+
+  // what the back buffer lacks: the regions of the frames presented since it was last on screen
+  int age = 0;
+  if (!Settings().partialPresent)
+    age = 0;
+  else if (mSurfaceless)
+    age = 1; // a pbuffer is never swapped: it always holds the last frame
+  else if (mHasBufferAge)
+  {
+    EGLint a = 0;
+    if (eglQuerySurface(mEGLDisplay, mEGLSurface, EGL_BUFFER_AGE_EXT, &a))
+      age = a;
+  }
+  mStats.bufferAge[std::min(std::max(age, 0), 3)]++;
+  IRECT region = r;
+  bool full = age <= 0 || age - 1 > mPresentHistoryN || r.Empty();
+  for (int i = 0; i < age - 1 && !full; i++)
+  {
+    if (mPresentHistory[i].Empty())
+      full = true;
+    else
+      region = region.Union(mPresentHistory[i]);
+  }
+  // a large region costs more than a full present: a full clear lets the GPU skip loading the
+  // old contents (vc4: no tile loads), a scissored one does not
+  if (!full && region.W() * region.H() > 0.5f * mSurfaceW * mSurfaceH)
+    full = true;
+  if (full)
+    region = IRECT();
+
+  // remember what this frame changes, for the buffers that come back later (a full present
+  // changes no more than that: the rest of the surface was already the current picture)
+  for (int i = kPresentHistory - 1; i > 0; i--)
+    mPresentHistory[i] = mPresentHistory[i - 1];
+  mPresentHistory[0] = r;
+  mPresentHistoryN = std::min(mPresentHistoryN + 1, kPresentHistory);
+  return region;
+}
+
 bool IGraphicsKMS::SaveScreenshot(const char* path)
 {
   // The back buffer is undefined after a swap: draw everything again and read it before presenting.
@@ -569,6 +702,11 @@ bool IGraphicsKMS::SaveScreenshot(const char* path)
   IRECTList rects;
   IsDirty(rects);
   SetAllControlsClean();
+  SetPresentRegion(IRECT());
+  for (int i = kPresentHistory - 1; i > 0; i--)
+    mPresentHistory[i] = mPresentHistory[i - 1];
+  mPresentHistory[0] = IRECT(0.f, 0.f, static_cast<float>(mSurfaceW), static_cast<float>(mSurfaceH));
+  mPresentHistoryN = std::min(mPresentHistoryN + 1, kPresentHistory);
   Draw(rects);
 
   std::vector<uint8_t> px(static_cast<size_t>(mSurfaceW) * mSurfaceH * 4);
@@ -583,6 +721,46 @@ bool IGraphicsKMS::SaveScreenshot(const char* path)
   const bool ok = stbi_write_png(path, mSurfaceW, mSurfaceH, 4, flipped.data(), static_cast<int>(row)) != 0;
   Present();
   return ok;
+}
+
+bool IGraphicsKMS::ReadSurface(std::vector<uint8_t>& rgba, int& w, int& h)
+{
+  w = mSurfaceW;
+  h = mSurfaceH;
+  std::vector<uint8_t> px(static_cast<size_t>(w) * h * 4);
+  GLint prev = 0;
+  glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev);
+  glBindFramebuffer(GL_FRAMEBUFFER, 0);
+  glPixelStorei(GL_PACK_ALIGNMENT, 1);
+  glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+  glBindFramebuffer(GL_FRAMEBUFFER, prev);
+  const size_t row = static_cast<size_t>(w) * 4;
+  rgba.resize(px.size());
+  for (int y = 0; y < h; y++)
+    memcpy(&rgba[y * row], &px[(h - 1 - y) * row], row);
+  return true;
+}
+
+bool IGraphicsKMS::ReadPanel(std::vector<uint8_t>& rgba, int& w, int& h)
+{
+  NVGframebuffer* pFB = GetMainFrameBuffer();
+  if (!pFB)
+    return false;
+  w = static_cast<int>(WindowWidth() * GetScreenScale());
+  h = static_cast<int>(WindowHeight() * GetScreenScale());
+  std::vector<uint8_t> px(static_cast<size_t>(w) * h * 4);
+  GLint prev = 0;
+  glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prev);
+  glBindFramebuffer(GL_FRAMEBUFFER, pFB->fbo);
+  glPixelStorei(GL_PACK_ALIGNMENT, 1);
+  glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
+  glBindFramebuffer(GL_FRAMEBUFFER, prev);
+  // GL row 0 is the panel's bottom row
+  const size_t row = static_cast<size_t>(w) * 4;
+  rgba.resize(px.size());
+  for (int y = 0; y < h; y++)
+    memcpy(&rgba[y * row], &px[(h - 1 - y) * row], row);
+  return true;
 }
 
 #pragma mark - touch

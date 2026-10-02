@@ -464,6 +464,10 @@ void IGraphicsNanoVG::OnViewInitialized(void* pContext)
 {  
 #if defined IGRAPHICS_METAL
   mVG = nvgCreateContext(pContext, NVG_ANTIALIAS | NVG_TRIPLE_BUFFER); //TODO: NVG_STENCIL_STROKES currently has issues
+#elif defined OS_LINUX && defined IGRAPHICS_GLES2
+  // IGraphicsKMS: clip every draw call with the GL scissor too, so a partial redraw costs the
+  // GPU the dirty area and not the whole window per dirty rect (vc4, Raspberry Pi 3)
+  mVG = nvgCreateContext(NVG_ANTIALIAS | (mScissorHW ? NVG_SCISSOR_HW : 0));
 #else
   mVG = nvgCreateContext(NVG_ANTIALIAS /*| NVG_STENCIL_STROKES*/);
 #endif
@@ -514,8 +518,13 @@ void IGraphicsNanoVG::BeginFrame()
 
 #ifdef IGRAPHICS_GL
     glViewport(0, 0, WindowWidth() * GetScreenScale(), WindowHeight() * GetScreenScale());
-    glClearColor(0.f, 0.f, 0.f, 0.f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    // With a present target, EndFrame() clears what it presents (possibly only the changed
+    // region, the rest of the surface kept): clearing the whole window here would undo that.
+    if (mPresentW <= 0)
+    {
+      glClearColor(0.f, 0.f, 0.f, 0.f);
+      glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    }
   #if defined OS_MAC || defined OS_IOS
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &mInitialFBO); // stash apple fbo
   #endif
@@ -529,6 +538,7 @@ void IGraphicsNanoVG::EndFrame()
 {
   nvgEndFrame(mVG); // end main frame buffer update
   nvgBindFramebuffer(nullptr);
+  OnPanelFlushed();
 
 #ifdef IGRAPHICS_GL
   if (mPresentW > 0 && mPresentH > 0)
@@ -536,10 +546,23 @@ void IGraphicsNanoVG::EndFrame()
     // Present into a surface larger than the panel (F69 pillarbox / letterbox): the whole
     // surface is the viewport, the matte fills it, the panel lands at (mPresentX, mPresentY).
     const float ss = GetScreenScale();
+    const IRECT& pr = mPresentRegion;
+    const bool partial = pr.W() > 0.f && pr.H() > 0.f;
     glViewport(0, 0, mPresentW, mPresentH);
+    if (partial)
+    {
+      // only the region changed since this buffer was last presented (buffer age): the GL scissor
+      // keeps the clear, and NVG_SCISSOR_HW the composite, to it (GL y is up)
+      glEnable(GL_SCISSOR_TEST);
+      glScissor(static_cast<GLint>(pr.L), static_cast<GLint>(mPresentH - pr.B), static_cast<GLsizei>(pr.W()), static_cast<GLsizei>(pr.H()));
+    }
     glClearColor(mPresentMatte.R / 255.f, mPresentMatte.G / 255.f, mPresentMatte.B / 255.f, 1.f);
     glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    if (partial)
+      glDisable(GL_SCISSOR_TEST);
     nvgBeginFrame(mVG, mPresentW / ss, mPresentH / ss, ss);
+    if (partial)
+      nvgScissor(mVG, pr.L / ss, pr.T / ss, pr.W() / ss, pr.H() / ss);
     const float x = mPresentX / ss, y = mPresentY / ss;
     NVGpaint img = nvgImagePattern(mVG, x, y, WindowWidth(), WindowHeight(), 0, mMainFrameBuffer->image, 1.0f);
     nvgBeginPath(mVG);
