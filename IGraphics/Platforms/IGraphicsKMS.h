@@ -145,8 +145,12 @@ public:
    * Hiding waits for a queued page flip, puts the CRTC back on the frame buffer it scanned out when the
    * window opened (the console's fbdev buffer, or the host's own panel drawn there) and stops drawing:
    * RenderFrame() draws nothing and returns 0, the controls keep their state and stay dirty, nothing touches
-   * the GPU. Showing drops the touch events queued meanwhile (and a finger that is still down, until it is
-   * lifted), marks every control dirty, and the next RenderFrame() takes the CRTC with a full frame.
+   * the GPU. A press in progress when the panel hides (a control captured by a touch whose release has
+   * not come yet, typically the very button that asked for the hide) gets its release first, at the last
+   * touch position, and the capture is cleared: the lift that follows goes to whoever has the screen
+   * then, and must not leave the next touch routed to that control. Showing clears any capture again,
+   * drops the touch events queued meanwhile (and a finger that is still down, until it is lifted), marks
+   * every control dirty, and the next RenderFrame() takes the CRTC with a full frame.
    * offscreen / surfaceless: only the drawing stops. \return false when the screen could not be handed back. */
   bool SetVisible(bool visible);
   bool IsVisible() const { return mVisible; }
@@ -214,6 +218,7 @@ private:
   bool OpenTouch(const std::string& path);
   void DispatchTouch();
   void DrainTouch();
+  void ReleaseTouchInProgress();
   bool RestoreSavedCrtc();
 
   bool mWindowOpen = false;
