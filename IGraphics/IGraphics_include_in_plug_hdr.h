@@ -24,13 +24,13 @@
 #if defined IGRAPHICS_GLES2
   #if defined OS_IOS
     #include <libGLESv2/angle_gl.h>
-  #elif defined OS_WEB
+  #elif defined OS_WEB || defined OS_LINUX
     #include <GLES2/gl2.h>
   #endif
 #elif defined IGRAPHICS_GLES3
   #if defined OS_IOS
     #include <libGLESv2/angle_gl.h>
-  #elif defined OS_WEB
+  #elif defined OS_WEB || defined OS_LINUX
     #include <GLES3/gl3.h>
   #endif
 #elif defined IGRAPHICS_GL2 || defined IGRAPHICS_GL3
@@ -54,7 +54,11 @@
 #elif defined OS_IOS
   #include "IGraphicsIOS.h"
 #elif defined OS_LINUX
-  #include "IGraphicsLinux.h"
+  #if defined IGRAPHICS_KMS
+    #include "IGraphicsKMS.h"
+  #else
+    #include "IGraphicsLinux.h"
+  #endif
 #elif defined OS_WEB
   #include "IGraphicsWeb.h"
 #endif

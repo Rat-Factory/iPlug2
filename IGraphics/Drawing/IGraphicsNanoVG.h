@@ -26,6 +26,13 @@
   #include <libGLESv2/angle_gl.h>
 #endif
 #endif
+#if defined OS_LINUX
+  #if defined IGRAPHICS_GLES2
+    #include <GLES2/gl2.h>
+  #elif defined IGRAPHICS_GLES3
+    #include <GLES3/gl3.h>
+  #endif
+#endif
 
   #define NANOVG_FBO_VALID 1
   #include "nanovg_gl_utils.h"
@@ -131,7 +138,17 @@ public:
   bool BitmapExtSupported(const char* ext) override;
 
   void DeleteFBO(NVGframebuffer* pBuffer);
-  
+
+  /** Present the panel into a larger surface (ROADMAP F69 / L9 spike). When \p surfaceW > 0,
+   * EndFrame() composites the main frame buffer (WindowWidth() x WindowHeight()) at (\p x, \p y)
+   * in a surface of \p surfaceW x \p surfaceH pixels and fills the rest with \p matte, so a
+   * full-screen platform (DRM/KMS) can pillarbox / letterbox the panel without touching its layout.
+   * surfaceW = 0 restores the default (the frame buffer fills the viewport). GL backends only. */
+  void SetPresentTarget(int surfaceW, int surfaceH, float x, float y, const IColor& matte)
+  {
+    mPresentW = surfaceW; mPresentH = surfaceH; mPresentX = x; mPresentY = y; mPresentMatte = matte;
+  }
+
 protected:
   APIBitmap* LoadAPIBitmap(const char* fileNameOrResID, int scale, EResourceLocation location, const char* ext) override;
   APIBitmap* LoadAPIBitmap(const char* name, const void* pData, int dataSize, int scale) override;
@@ -170,6 +187,9 @@ private:
   NVGcontext* mVG = nullptr;
   NVGframebuffer* mMainFrameBuffer = nullptr;
   int mInitialFBO = 0;
+  int mPresentW = 0, mPresentH = 0;
+  float mPresentX = 0.f, mPresentY = 0.f;
+  IColor mPresentMatte = COLOR_BLACK;
 };
 
 END_IGRAPHICS_NAMESPACE
