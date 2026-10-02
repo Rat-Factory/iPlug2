@@ -47,7 +47,15 @@
       #error Define either IGRAPHICS_GL2 or IGRAPHICS_GL3 when using IGRAPHICS_GL and IGRAPHICS_NANOVG with OS_WIN
     #endif
   #elif defined OS_LINUX
-    #error NOT IMPLEMENTED
+    #if defined IGRAPHICS_GLES2
+      #include <GLES2/gl2.h>
+      #define NANOVG_GLES2_IMPLEMENTATION
+    #elif defined IGRAPHICS_GLES3
+      #include <GLES3/gl3.h>
+      #define NANOVG_GLES3_IMPLEMENTATION
+    #else
+      #error On Linux, IGRAPHICS_NANOVG needs IGRAPHICS_GLES2 or IGRAPHICS_GLES3 (EGL; see IGraphicsKMS)
+    #endif
   #elif defined OS_WEB
     #if defined IGRAPHICS_GLES2
       #define NANOVG_GLES2_IMPLEMENTATION
@@ -521,6 +529,27 @@ void IGraphicsNanoVG::EndFrame()
 {
   nvgEndFrame(mVG); // end main frame buffer update
   nvgBindFramebuffer(nullptr);
+
+#ifdef IGRAPHICS_GL
+  if (mPresentW > 0 && mPresentH > 0)
+  {
+    // Present into a surface larger than the panel (F69 pillarbox / letterbox): the whole
+    // surface is the viewport, the matte fills it, the panel lands at (mPresentX, mPresentY).
+    const float ss = GetScreenScale();
+    glViewport(0, 0, mPresentW, mPresentH);
+    glClearColor(mPresentMatte.R / 255.f, mPresentMatte.G / 255.f, mPresentMatte.B / 255.f, 1.f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    nvgBeginFrame(mVG, mPresentW / ss, mPresentH / ss, ss);
+    const float x = mPresentX / ss, y = mPresentY / ss;
+    NVGpaint img = nvgImagePattern(mVG, x, y, WindowWidth(), WindowHeight(), 0, mMainFrameBuffer->image, 1.0f);
+    nvgBeginPath(mVG);
+    nvgRect(mVG, x, y, WindowWidth(), WindowHeight());
+    nvgFillPaint(mVG, img);
+    nvgFill(mVG);
+  }
+  else
+#endif
+  {
   nvgBeginFrame(mVG, WindowWidth(), WindowHeight(), GetScreenScale());
   
   NVGpaint img = nvgImagePattern(mVG, 0, 0, WindowWidth(), WindowHeight(), 0, mMainFrameBuffer->image, 1.0f);
@@ -533,6 +562,7 @@ void IGraphicsNanoVG::EndFrame()
   nvgFillPaint(mVG, img);
   nvgFill(mVG);
   nvgRestore(mVG);
+  }
   
 #if (defined OS_MAC || defined OS_IOS) && defined IGRAPHICS_GL
   glBindFramebuffer(GL_FRAMEBUFFER, mInitialFBO); // restore apple fbo
