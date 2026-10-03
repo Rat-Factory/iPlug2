@@ -134,16 +134,14 @@ void* IGraphicsKMS::OpenWindow(void* pWindow)
     FitToContainer(mSurfaceW, mSurfaceH, false);
   else
     Resize(Width(), Height(), 1.f, false);
-  mFitScale = GetDrawScale(); // after Clip(min, max scale)
-  mOffX = GetLetterboxOffsetX();
-  mOffY = GetLetterboxOffsetY();
+  const float fitScale = GetDrawScale(); // after Clip(min, max scale)
   const IRECT panel = GetLetterboxPanelBounds();
-  const float panelW = std::round(panel.W() * mFitScale), panelH = std::round(panel.H() * mFitScale);
+  const float panelW = std::round(panel.W() * fitScale), panelH = std::round(panel.H() * fitScale);
   SetPresentTarget(mSurfaceW, mSurfaceH, 0.f, 0.f, cfg.matte); // the frame buffer is the whole surface when letterboxed
 
   fprintf(stderr, "IGraphicsKMS: %s %dx%d, panel %dx%d at scale %.4f -> %.0fx%.0f at (%.0f, %.0f), %s%s\n",
-          mSurfaceless ? "surfaceless" : mOffscreen ? "offscreen" : "kms", mSurfaceW, mSurfaceH, Width(), Height(), mFitScale,
-          panelW, panelH, mOffX, mOffY, cfg.rgb565 ? "RGB565" : "XRGB8888", mVisible ? "" : ", hidden (the screen is left as it is)");
+          mSurfaceless ? "surfaceless" : mOffscreen ? "offscreen" : "kms", mSurfaceW, mSurfaceH, Width(), Height(), fitScale,
+          panelW, panelH, GetLetterboxOffsetX(), GetLetterboxOffsetY(), cfg.rgb565 ? "RGB565" : "XRGB8888", mVisible ? "" : ", hidden (the screen is left as it is)");
   fprintf(stderr, "IGraphicsKMS: GL_RENDERER %s | GL_VERSION %s\n",
           (const char*) glGetString(GL_RENDERER), (const char*) glGetString(GL_VERSION));
 
@@ -777,7 +775,8 @@ IRECT IGraphicsKMS::PresentRegionFor(const IRECTList& panelRects)
   for (int i = 0; i < panelRects.Size(); i++)
   {
     const IRECT& p = panelRects.Get(i);
-    const IRECT q(std::floor(mOffX + p.L * s) - 1.f, std::floor(mOffY + p.T * s) - 1.f, std::ceil(mOffX + p.R * s) + 1.f, std::ceil(mOffY + p.B * s) + 1.f);
+    const float ox = GetLetterboxOffsetX(), oy = GetLetterboxOffsetY();
+    const IRECT q(std::floor(ox + p.L * s) - 1.f, std::floor(oy + p.T * s) - 1.f, std::ceil(ox + p.R * s) + 1.f, std::ceil(oy + p.B * s) + 1.f);
     r = r.Empty() ? q : r.Union(q);
   }
   r = r.Intersect(IRECT(0.f, 0.f, static_cast<float>(mSurfaceW), static_cast<float>(mSurfaceH)));
@@ -997,7 +996,7 @@ void IGraphicsKMS::DispatchTouch()
   if (cfg.touchInvertY) ny = 1.f - ny;
   const float sx = nx * mSurfaceW, sy = ny * mSurfaceH;
   // view units (surface pixels / draw scale): IGraphics takes the letterbox offset off (ViewToUI)
-  const float x = sx / mFitScale, y = sy / mFitScale;
+  const float x = sx / GetDrawScale(), y = sy / GetDrawScale();
 
   if (mSuppressTouch)
   {
@@ -1066,7 +1065,8 @@ bool IGraphicsKMS::UIToRawTouch(float x, float y, int& rawX, int& rawY) const
 {
   if (mTouchFD < 0)
     return false;
-  SurfaceToRawTouch(mOffX + x * mFitScale, mOffY + y * mFitScale, rawX, rawY);
+  UIToView(x, y);
+  SurfaceToRawTouch(x * GetDrawScale(), y * GetDrawScale(), rawX, rawY);
   return true;
 }
 

@@ -190,9 +190,9 @@ public:
 
   int SurfaceWidth() const { return mSurfaceW; }
   int SurfaceHeight() const { return mSurfaceH; }
-  float FitScale() const { return mFitScale; }
-  float OffsetX() const { return mOffX; }
-  float OffsetY() const { return mOffY; }
+  float FitScale() const { return GetDrawScale(); }
+  float OffsetX() const { return GetLetterboxOffsetX(); }
+  float OffsetY() const { return GetLetterboxOffsetY(); }
   const char* TouchName() const { return mTouchName.c_str(); }
   void TouchRange(int& minX, int& maxX, int& minY, int& maxY) const { minX = mAbsMinX; maxX = mAbsMaxX; minY = mAbsMinY; maxY = mAbsMaxY; }
 
@@ -253,7 +253,6 @@ private:
   void* mEGLContext = nullptr;
   void* mEGLSurface = nullptr;
   int mSurfaceW = 0, mSurfaceH = 0;
-  float mFitScale = 1.f, mOffX = 0.f, mOffY = 0.f;
   bool mFlipPending = false;
 
   int mTouchFD = -1;
