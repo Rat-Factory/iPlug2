@@ -807,7 +807,8 @@ public:
    * @param hide should it be hidden or not */
   virtual void HidePlatformView(void* pView, bool hide) {};
 
-  /** Get the x, y position of the mouse cursor
+  /** Get the x, y position of the mouse cursor, in view units (window pixels / draw scale, as mouse events arrive;
+   * the same as UI coordinates unless letterboxed, FitToContainer(): ViewToUI() gives the UI point)
    * @param x Where the X position will be stored
    * @param y Where the Y position will be stored */
   virtual void GetMouseLocation(float& x, float&y) const = 0;
@@ -817,7 +818,8 @@ public:
    * @param lock Set \c true to hold the cursor in place while hidden */
   virtual void HideMouseCursor(bool hide = true, bool lock = true) = 0;
 
-  /** Force move the mouse cursor to a specific position
+  /** Force move the mouse cursor to a specific position, in view units like GetMouseLocation() (the same as UI
+   * coordinates unless letterboxed: UIToView() a UI point first)
    * @param x New X position in pixels
    * @param y New Y position in pixels */
   virtual void MoveMouseCursor(float x, float y) = 0;

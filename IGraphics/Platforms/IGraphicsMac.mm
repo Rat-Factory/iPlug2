@@ -181,7 +181,8 @@ void IGraphicsMac::PointToScreen(float& x, float& y) const
 {
   if (mView)
   {
-    UIToView(x, y); // letterboxed: the UI's offset in the view (F69)
+    // view units (as ScreenToPoint() returns them and the view's mouse events deliver them), so MoveMouseCursor()
+    // and GetMouseLocation() / the stored cursor position agree while letterboxed; a UI point needs UIToView() first
     x *= GetDrawScale();
     y *= GetDrawScale();
     NSWindow* pWindow = [(IGRAPHICS_VIEW*) mView window];
