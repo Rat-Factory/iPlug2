@@ -1084,6 +1084,56 @@ public:
    * @param needsPlatformResize Set true for manual resize from plug-in UI, false when called from
    * IEditorDelegate::OnParentWindowResize() to avoid feedback loops */
   void Resize(int w, int h, float scale, bool needsPlatformResize = true);
+
+  /** Letterbox / pillarbox (Rat Factory, Tink ROADMAP F69): fits the UI, at its own Width() x Height() and aspect,
+   * into a container of \p w x \p h window pixels (the units of WindowWidth()): uniform draw scale
+   * min(w / Width(), h / Height()) (within the scale constraints), the UI centred at a whole-pixel offset.
+   * WindowWidth() / WindowHeight() then report the container, so the platform view and the drawing surface cover
+   * it all. The dead space around the UI (the bands) is drawn by the letterbox draw function
+   * (SetLetterboxDrawFunc()) on full redraws only; controls never draw there (their dirty rects are clipped to
+   * the UI), so targeted redraws leave the bands alone.
+   * Coordinates: drawing stays in the UI's own coordinates (the offset is part of the base transform), and the
+   * platform keeps passing input to OnMouseDown() etc. in view units (window pixels / draw scale, measured from
+   * the view's top left) as it always has: IGraphics takes the offset off itself (ViewToUI()). Platform code that
+   * maps UI rects back to the window (text entry, menus, tooltips) adds it with UIToView().
+   * A container whose aspect matches (the UI fills it to within a pixel) is plain Resize(Width(), Height(), scale).
+   * Resize() leaves letterboxing (the window is the UI's own size again).
+   * @param w Container width, window pixels
+   * @param h Container height, window pixels
+   * @param needsPlatformResize As for Resize(): false when called from IEditorDelegate::OnParentWindowResize() */
+  void FitToContainer(int w, int h, bool needsPlatformResize = false);
+
+  /** @return \c true while FitToContainer() has left bands around the UI */
+  bool IsLetterboxed() const { return mContainerW > 0; }
+
+  /** @return The UI's offset in the container, window pixels (0 when not letterboxed) */
+  float GetLetterboxOffsetX() const { return mLetterboxX; }
+  float GetLetterboxOffsetY() const { return mLetterboxY; }
+
+  /** @return The whole container (the view) in UI coordinates: GetBounds() when not letterboxed */
+  IRECT GetContainerBounds() const;
+
+  /** @return The part of the container the UI draws, in UI coordinates: GetBounds() trimmed to the whole window
+   * pixels it covers (as WindowWidth() truncates). The bands are the rest of GetContainerBounds(). */
+  IRECT GetLetterboxPanelBounds() const;
+
+  /** The dead-space rects (up to four: top, bottom, left, right), UI coordinates; empty when not letterboxed */
+  void GetLetterboxBands(IRECTList& bands) const;
+
+  /** Sets what the bands look like. \p func is called once per band in a full redraw, with the clip set to the band
+   * and the UI's coordinates in force; \p panel is GetLetterboxPanelBounds(). Default: the band filled with
+   * SetLetterboxColor()'s colour. */
+  void SetLetterboxDrawFunc(ILetterboxDrawFunc func) { mLetterboxDrawFunc = func; mLetterboxDirty = true; }
+
+  /** Sets the colour of the default band fill */
+  void SetLetterboxColor(const IColor& color) { mLetterboxColor = color; mLetterboxDirty = true; }
+
+  /** View units (window pixels / draw scale, from the view's top left) to UI coordinates: takes the letterbox
+   * offset off. Identity when not letterboxed. */
+  void ViewToUI(float& x, float& y) const { x -= mLetterboxX / mDrawScale; y -= mLetterboxY / mDrawScale; }
+
+  /** UI coordinates to view units (the inverse of ViewToUI()) */
+  void UIToView(float& x, float& y) const { x += mLetterboxX / mDrawScale; y += mLetterboxY / mDrawScale; }
   
   /** Enables strict drawing mode. When enabled, only dirty controls are redrawn.
    * When disabled, all controls are redrawn on each frame.
@@ -1102,12 +1152,13 @@ public:
   int Height() const { return mHeight; }
 
   /** Gets the width of the graphics context including draw scaling
-   * @return A whole number representing the width of the graphics context with scaling in pixels on a 1:1 screen */
-  int WindowWidth() const { return static_cast<int>(static_cast<float>(mWidth) * mDrawScale); }
+   * @return A whole number representing the width of the graphics context with scaling in pixels on a 1:1 screen
+   * (letterboxed: the container's width, FitToContainer()) */
+  int WindowWidth() const { return mContainerW > 0 ? mContainerW : static_cast<int>(static_cast<float>(mWidth) * mDrawScale); }
 
   /** Gets the height of the graphics context including draw scaling
    * @return A whole number representing the height of the graphics context with scaling in pixels on a 1:1 screen */
-  int WindowHeight() const { return static_cast<int>(static_cast<float>(mHeight) * mDrawScale); }
+  int WindowHeight() const { return mContainerH > 0 ? mContainerH : static_cast<int>(static_cast<float>(mHeight) * mDrawScale); }
 
   /** Gets the drawing frame rate
    * @return A whole number representing the desired frame rate at which the graphics context is redrawn. NOTE: the actual frame rate might be different */
@@ -1233,7 +1284,7 @@ public:
   bool RespondsToGesture(float x, float y);
   
   /** Called by platform class when a gesture is recognized */
-  void OnGestureRecognized(const IGestureInfo& info);
+  void OnGestureRecognized(const IGestureInfo& viewInfo);
 
   /** Returns a scaling factor for resizing parent windows via the host/plugin API
    * @return A scaling factor for resizing parent windows */
@@ -1530,6 +1581,10 @@ private:
   
 #pragma mark - Event handling
 public:
+  /* Input from the platform class: coordinates in view units (window pixels / draw scale, from the view's top
+   * left). Letterboxed (FitToContainer()), IGraphics takes the UI's offset off (ViewToUI()); otherwise they are UI
+   * coordinates, as always. */
+
   /** Called when the platform class sends mouse down events */
   void OnMouseDown(const std::vector<IMouseInfo>& points);
 
@@ -1594,6 +1649,11 @@ public:
   
   /** Called by ICornerResizerControl as the corner is dragged to resize */
   void OnDragResize(float x, float y);
+
+private:
+  void DoResize(int w, int h, float scale, bool needsPlatformResize, int containerW, int containerH, float offX, float offY);
+  void DrawLetterbox(const IRECTList& rects);
+public:
 
   /** Called by the platform class if the view changes to dark/light mode
    * @param appearance Light/Dark mode */
@@ -1843,6 +1903,13 @@ private:
   int mFPS;
   float mScreenScale = 1.f; // the scaling of the display that the UI is currently on e.g. 2 for retina
   float mDrawScale = 1.f; // scale deviation from  default width and height i.e stretching the UI by dragging bottom right hand corner
+  int mContainerW = 0; // FitToContainer(): the container, window pixels (0: not letterboxed, the window is the UI)
+  int mContainerH = 0;
+  float mLetterboxX = 0.f; // the UI's offset in the container, window pixels
+  float mLetterboxY = 0.f;
+  bool mLetterboxDirty = false; // the bands want drawing in the next Draw()
+  IColor mLetterboxColor = COLOR_BLACK;
+  ILetterboxDrawFunc mLetterboxDrawFunc = nullptr;
 
   int mIdleTicks = 0;
   

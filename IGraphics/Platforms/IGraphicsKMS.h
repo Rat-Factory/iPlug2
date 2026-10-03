@@ -24,7 +24,9 @@
  *               GPU path while another process owns the display (and measures headroom).
  *
  * The panel keeps its own layout and is drawn at a uniform scale that fits the surface,
- * centred, with a matte around it (ROADMAP F69), through IGraphicsNanoVG::SetPresentTarget().
+ * centred, with bands around it (ROADMAP F69), by IGraphics::FitToContainer(): the panel's
+ * frame buffer covers the surface and the bands are drawn by the letterbox draw function
+ * (default: the matte colour). Touch reaches IGraphics in view units, as from any platform.
  *
  * There is no event loop: the program that owns the process calls PollInput() and
  * RenderFrame() from its main loop (the appliance's main loop, or a test driver).
@@ -65,7 +67,8 @@ public:
     int modeW = 0, modeH = 0;                     // kms: wanted mode (0 = the connector's preferred)
     bool rgb565 = false;                          // scanout / surface format: RGB565 instead of XRGB8888
     bool fit = true;                              // uniform scale to fit the surface (F69); false: 1:1, top left
-    IColor matte = IColor(255, 12, 12, 14);       // dead space around the panel
+    IColor matte = IColor(255, 12, 12, 14);       // dead space around the panel: the default band colour
+                                                  // (IGraphics::SetLetterboxDrawFunc() replaces it)
     std::string touchDevice;                      // evdev node ("" = none, "auto" = first INPUT_PROP_DIRECT device)
     bool touchSwapXY = false, touchInvertX = false, touchInvertY = false;
     bool logInput = false;                        // one stderr line per dispatched touch event
@@ -117,7 +120,7 @@ public:
   void HideMouseCursor(bool hide, bool lock) override {}
   void MoveMouseCursor(float x, float y) override {}
   ECursor SetMouseCursor(ECursor cursorType) override { return ECursor::ARROW; }
-  void GetMouseLocation(float& x, float& y) const override { x = mLastX; y = mLastY; }
+  void GetMouseLocation(float& x, float& y) const override { x = mLastX; y = mLastY; } // view units
 
   EMsgBoxResult ShowMessageBox(const char* str, const char* title, EMsgBoxType type, IMsgBoxCompletionHandlerFunc completionHandler) override;
   void ForceEndUserEdit() override {}
@@ -169,7 +172,7 @@ public:
   /** Writes the last presented surface (whole screen incl. matte) to a PNG. Call right after RenderFrame(). */
   bool SaveScreenshot(const char* path);
 
-  /** Reads the panel's own frame buffer (Width x Height at the draw scale, RGBA, top row first) as
+  /** Reads the panel's own frame buffer (WindowWidth x WindowHeight: the whole surface when letterboxed, RGBA, top row first) as
    * it is now, without drawing: what partial redraws have built up. Tests compare it with a full redraw. */
   bool ReadPanel(std::vector<uint8_t>& rgba, int& w, int& h);
 

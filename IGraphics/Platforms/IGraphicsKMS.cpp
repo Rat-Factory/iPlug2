@@ -125,16 +125,21 @@ void* IGraphicsKMS::OpenWindow(void* pWindow)
   OnViewInitialized(nullptr);   // nvgCreateGLES2 on the current context
   SetScreenScale(1.f);
 
-  // F69: uniform scale to fit the surface, centred; the panel's own layout is untouched.
-  mFitScale = 1.f;
+  // F69: IGraphics letterboxes the panel in the surface (FitToContainer: uniform scale, centred, the bands drawn
+  // by the letterbox draw function in the panel's frame buffer, which then covers the whole surface); the panel's
+  // own layout is untouched. The matte stays the default band colour, and fills the surface around the panel
+  // when fit is off (1:1, top left).
+  SetLetterboxColor(cfg.matte);
   if (cfg.fit)
-    mFitScale = std::min(mSurfaceW / static_cast<float>(Width()), mSurfaceH / static_cast<float>(Height()));
-  Resize(Width(), Height(), mFitScale, false);
+    FitToContainer(mSurfaceW, mSurfaceH, false);
+  else
+    Resize(Width(), Height(), 1.f, false);
   mFitScale = GetDrawScale(); // after Clip(min, max scale)
-  const float panelW = WindowWidth(), panelH = WindowHeight();
-  mOffX = cfg.fit ? std::floor((mSurfaceW - panelW) * 0.5f) : 0.f;
-  mOffY = cfg.fit ? std::floor((mSurfaceH - panelH) * 0.5f) : 0.f;
-  SetPresentTarget(mSurfaceW, mSurfaceH, mOffX, mOffY, cfg.matte);
+  mOffX = GetLetterboxOffsetX();
+  mOffY = GetLetterboxOffsetY();
+  const IRECT panel = GetLetterboxPanelBounds();
+  const float panelW = std::round(panel.W() * mFitScale), panelH = std::round(panel.H() * mFitScale);
+  SetPresentTarget(mSurfaceW, mSurfaceH, 0.f, 0.f, cfg.matte); // the frame buffer is the whole surface when letterboxed
 
   fprintf(stderr, "IGraphicsKMS: %s %dx%d, panel %dx%d at scale %.4f -> %.0fx%.0f at (%.0f, %.0f), %s%s\n",
           mSurfaceless ? "surfaceless" : mOffscreen ? "offscreen" : "kms", mSurfaceW, mSurfaceH, Width(), Height(), mFitScale,
@@ -574,11 +579,14 @@ void IGraphicsKMS::ReleaseTouchInProgress()
       info.y = mLastY;
     }
     else
-      GetMouseDownPoint(info.x, info.y);
+    {
+      GetMouseDownPoint(info.x, info.y); // UI coordinates
+      UIToView(info.x, info.y);
+    }
     info.ms = IMouseMod(false);
     OnMouseUp({info});
     if (Settings().logInput)
-      fprintf(stderr, "touch up   (released on hide) -> ui (%.1f, %.1f)\n", info.x, info.y);
+      fprintf(stderr, "touch up   (released on hide) -> view (%.1f, %.1f)\n", info.x, info.y);
   }
   ReleaseMouseCapture();
   mTouchWasDown = mTouchDown = false;
@@ -988,7 +996,8 @@ void IGraphicsKMS::DispatchTouch()
   if (cfg.touchInvertX) nx = 1.f - nx;
   if (cfg.touchInvertY) ny = 1.f - ny;
   const float sx = nx * mSurfaceW, sy = ny * mSurfaceH;
-  const float x = (sx - mOffX) / mFitScale, y = (sy - mOffY) / mFitScale;
+  // view units (surface pixels / draw scale): IGraphics takes the letterbox offset off (ViewToUI)
+  const float x = sx / mFitScale, y = sy / mFitScale;
 
   if (mSuppressTouch)
   {
@@ -1029,8 +1038,12 @@ void IGraphicsKMS::DispatchTouch()
   }
 
   if (what && cfg.logInput)
-    fprintf(stderr, "touch %-4s raw (%d, %d) -> surface (%.1f, %.1f) -> ui (%.1f, %.1f)%s\n", what, mRawX, mRawY, sx, sy, x, y,
-            (x < 0 || y < 0 || x > Width() || y > Height()) ? " [matte]" : "");
+  {
+    float ux = x, uy = y;
+    ViewToUI(ux, uy);
+    fprintf(stderr, "touch %-4s raw (%d, %d) -> surface (%.1f, %.1f) -> ui (%.1f, %.1f)%s\n", what, mRawX, mRawY, sx, sy, ux, uy,
+            (ux < 0 || uy < 0 || ux > Width() || uy > Height()) ? " [matte]" : "");
+  }
 
   mLastX = x;
   mLastY = y;

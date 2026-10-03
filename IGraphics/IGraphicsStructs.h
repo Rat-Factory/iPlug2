@@ -52,6 +52,7 @@ using IColorPickerHandlerFunc = std::function<void(const IColor& result)>;
 using IGestureFunc = std::function<void(IControl*, const IGestureInfo&)>;
 using IPopupFunction = std::function<void(IPopupMenu* pMenu)>;
 using IDisplayTickFunc = std::function<void()>;
+using ILetterboxDrawFunc = std::function<void(IGraphics& g, const IRECT& band, const IRECT& panel)>;
 using IUIAppearanceChangedFunc = std::function<void(EUIAppearance appearance)>;
 using ILiveEditEventFunc = std::function<void(const char* eventJson)>;
 using ITouchID = uintptr_t;

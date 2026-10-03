@@ -856,6 +856,8 @@ void IGraphicsNanoVG::PathTransformSetMatrix(const IMatrix& m)
   }
   
   nvgResetTransform(mVG);
+  if (mLayers.empty()) // the main frame buffer: the UI at its letterbox offset (F69; 0 when not letterboxed)
+    nvgTranslate(mVG, GetLetterboxOffsetX(), GetLetterboxOffsetY());
   nvgScale(mVG, GetDrawScale(), GetDrawScale());
   nvgTranslate(mVG, xTranslate, yTranslate);
   nvgTransform(mVG, m.mXX, m.mYX, m.mXY, m.mYY, m.mTX, m.mTY);
