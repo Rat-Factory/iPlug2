@@ -1252,12 +1252,16 @@ void IGraphicsWeb::CreatePlatformTextEntry(int paramIdx, const IText& text, cons
     input["style"].set(colorName, std::string(str.Get()));
   };
 
+  // bounds are in UI coordinates; the canvas is Width() x Height() scaled by the draw scale in CSS pixels
+  // (DrawResize()), so the input is placed and sized at the draw scale, as the popup menu anchor is
+  const double scale = static_cast<double>(GetDrawScale());
+
   input.set("id", std::string("textEntry"));
   input["style"].set("position", val("fixed"));
-  setDim("left", rect["left"].as<double>() + bounds.L);
-  setDim("top", rect["top"].as<double>() + bounds.T);
-  setDim("width", bounds.W());
-  setDim("height", bounds.H());
+  setDim("left", rect["left"].as<double>() + bounds.L * scale);
+  setDim("top", rect["top"].as<double>() + bounds.T * scale);
+  setDim("width", bounds.W() * scale);
+  setDim("height", bounds.H() * scale);
   
   setColor("color", text.mTextEntryFGColor);
   setColor("background-color", text.mTextEntryBGColor);
