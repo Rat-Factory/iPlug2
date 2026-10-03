@@ -103,21 +103,51 @@ static inline int LetterboxPanelPixels(int len, float scale)
   return static_cast<int>(std::floor(static_cast<float>(len) * scale + 1e-3f));
 }
 
-void IGraphics::FitToContainer(int cw, int ch, bool needsPlatformResize)
+// the UI's size (constrained as FitToContainer() resizes it) and its uniform fit in a cw x ch container
+static inline bool LetterboxFit(const IGEditorDelegate* pDelegate, int uiW, int uiH, int cw, int ch, float minScale, float maxScale, int& w, int& h, float& scale)
 {
-  int w = Width(), h = Height();
-  GetDelegate()->ConstrainEditorResize(w, h);
-
+  w = uiW;
+  h = uiH;
+  pDelegate->ConstrainEditorResize(w, h);
   if (cw <= 0 || ch <= 0 || w <= 0 || h <= 0)
-    return;
+    return false;
+  scale = Clip(std::min(static_cast<float>(cw) / static_cast<float>(w), static_cast<float>(ch) / static_cast<float>(h)), minScale, maxScale);
+  return true;
+}
 
-  const float scale = Clip(std::min(static_cast<float>(cw) / static_cast<float>(w), static_cast<float>(ch) / static_cast<float>(h)), mMinScale, mMaxScale);
+bool IGraphics::NeedsLetterbox(int cw, int ch, int slack) const
+{
+  int w, h;
+  float scale;
+  if (!LetterboxFit(mDelegate, Width(), Height(), cw, ch, mMinScale, mMaxScale, w, h, scale))
+    return false;
   const int pw = LetterboxPanelPixels(w, scale), ph = LetterboxPanelPixels(h, scale);
+  return std::abs(cw - pw) > slack || std::abs(ch - ph) > slack;
+}
 
-  if (pw == cw && ph == ch) // the aspect matches: no bands
+void IGraphics::EnableLetterbox(bool enable)
+{
+  mLetterboxEnabled = enable;
+  if (!enable && IsLetterboxed()) // the window back to the UI's own size, same scale
+    DoResize(Width(), Height(), GetDrawScale(), false, 0, 0, 0.f, 0.f);
+}
+
+bool IGraphics::FitToContainer(int cw, int ch, bool needsPlatformResize)
+{
+  int w, h;
+  float scale;
+  if (!LetterboxFit(mDelegate, Width(), Height(), cw, ch, mMinScale, mMaxScale, w, h, scale))
+    return false;
+
+  const int pw = LetterboxPanelPixels(w, scale), ph = LetterboxPanelPixels(h, scale);
+  const bool mismatch = pw != cw || ph != ch;
+
+  if (!mismatch || !mLetterboxEnabled) // the aspect matches, or letterboxing is off: a plain uniform fit, no bands
     DoResize(w, h, scale, needsPlatformResize, 0, 0, 0.f, 0.f);
   else // centred at whole window pixels (negative when the scale constraints leave the UI larger than the container)
     DoResize(w, h, scale, needsPlatformResize, cw, ch, std::floor((cw - pw) * 0.5f), std::floor((ch - ph) * 0.5f));
+
+  return mismatch;
 }
 
 IRECT IGraphics::GetContainerBounds() const

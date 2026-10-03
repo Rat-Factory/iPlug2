@@ -1098,10 +1098,29 @@ public:
    * maps UI rects back to the window (text entry, menus, tooltips) adds it with UIToView().
    * A container whose aspect matches (the UI fills it to within a pixel) is plain Resize(Width(), Height(), scale).
    * Resize() leaves letterboxing (the window is the UI's own size again).
+   * Letterboxing is opt-in (EnableLetterbox(), off by default): without it FitToContainer() is the plain uniform fit,
+   * Resize(Width(), Height(), scale) with the same scale, the window the UI's own size at that scale, and no bands.
    * @param w Container width, window pixels
    * @param h Container height, window pixels
-   * @param needsPlatformResize As for Resize(): false when called from IEditorDelegate::OnParentWindowResize() */
-  void FitToContainer(int w, int h, bool needsPlatformResize = false);
+   * @param needsPlatformResize As for Resize(): false when called from IEditorDelegate::OnParentWindowResize()
+   * @return \c true when the container's aspect differs from the UI's (NeedsLetterbox()), whether or not bands
+   * were drawn */
+  bool FitToContainer(int w, int h, bool needsPlatformResize = false);
+
+  /** Opts in to (or out of) letterboxing in FitToContainer(). Off by default: a plug-in or desktop app keeps its
+   * window at the UI's aspect and FitToContainer() is a plain uniform fit. A full-screen platform whose surface has
+   * its own aspect (IGraphicsKMS) turns it on, as can a delegate that cannot get the window it asks for (a host
+   * that keeps an editor size of another aspect). Turning it off while letterboxed leaves letterboxing at the
+   * same draw scale; turning it on takes effect at the next FitToContainer(). */
+  void EnableLetterbox(bool enable);
+
+  /** @return \c true when FitToContainer() letterboxes (EnableLetterbox()) */
+  bool LetterboxEnabled() const { return mLetterboxEnabled; }
+
+  /** @return \c true when the UI, fitted to a \p w x \p h window-pixel container at a uniform scale, would leave
+   * more than \p slack window pixels of the container uncovered on either axis (FitToContainer() with letterboxing
+   * on would draw bands). With \p slack 0 this is exactly FitToContainer()'s own test. */
+  bool NeedsLetterbox(int w, int h, int slack = 0) const;
 
   /** @return \c true while FitToContainer() has left bands around the UI */
   bool IsLetterboxed() const { return mContainerW > 0; }
@@ -1918,6 +1937,7 @@ private:
   bool mLetterboxDirty = false; // the bands want drawing in the next Draw()
   IColor mLetterboxColor = COLOR_BLACK;
   ILetterboxDrawFunc mLetterboxDrawFunc = nullptr;
+  bool mLetterboxEnabled = false; // EnableLetterbox(): FitToContainer() letterboxes (off: a plain uniform fit)
 
   int mIdleTicks = 0;
   

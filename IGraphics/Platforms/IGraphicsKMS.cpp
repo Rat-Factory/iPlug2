@@ -129,7 +129,10 @@ void* IGraphicsKMS::OpenWindow(void* pWindow)
   // by the letterbox draw function in the panel's frame buffer, which then covers the whole surface); the panel's
   // own layout is untouched. The matte stays the default band colour, and fills the surface around the panel
   // when fit is off (1:1, top left).
+  // Letterboxing is opt-in in IGraphics (a plug-in or desktop window keeps the UI's aspect instead); a screen has
+  // the aspect it has, so the full-screen KMS path opts in whenever it fits.
   SetLetterboxColor(cfg.matte);
+  EnableLetterbox(cfg.fit);
   if (cfg.fit)
     FitToContainer(mSurfaceW, mSurfaceH, false);
   else
