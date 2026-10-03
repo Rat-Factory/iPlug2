@@ -1134,6 +1134,14 @@ public:
 
   /** UI coordinates to view units (the inverse of ViewToUI()) */
   void UIToView(float& x, float& y) const { x += mLetterboxX / mDrawScale; y += mLetterboxY / mDrawScale; }
+
+  /** A rect in UI coordinates to view units (UIToView() on both corners): what platform code scales to place a
+   * native widget (text entry, popup menu, platform view) over a UI rect, or to invalidate it */
+  IRECT UIToView(const IRECT& r) const { return r.GetTranslated(mLetterboxX / mDrawScale, mLetterboxY / mDrawScale); }
+
+  /** A rect in view units to UI coordinates (the inverse of UIToView(const IRECT&)): a region the platform asks
+   * to be redrawn */
+  IRECT ViewToUI(const IRECT& r) const { return r.GetTranslated(-mLetterboxX / mDrawScale, -mLetterboxY / mDrawScale); }
   
   /** Enables strict drawing mode. When enabled, only dirty controls are redrawn.
    * When disabled, all controls are redrawn on each frame.

@@ -2499,6 +2499,7 @@ void IGraphics::SetQwertyMidiKeyHandlerFunc(std::function<void(const IMidiMsg& m
 
 bool IGraphics::RespondsToGesture(float x, float y)
 {
+  ViewToUI(x, y); // view units from the platform, as OnGestureRecognized()
   IControl* pControl = GetMouseControl(x, y, false, false);
 
   if(pControl && pControl->GetWantsGestures())
