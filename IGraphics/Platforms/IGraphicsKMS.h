@@ -28,6 +28,14 @@
  * frame buffer covers the surface and the bands are drawn by the letterbox draw function
  * (default: the matte colour). Touch reaches IGraphics in view units, as from any platform.
  *
+ * Rotation (Config::rotation; Rat Factory L27): the UI is landscape, the panel may not be (the Raspberry Pi Touch
+ * Display 2 scans out 720 x 1280). With a rotation of 90 / 180 / 270 degrees clockwise the panel is fitted into the
+ * rotated (logical) space — 1280 x 720 for that panel — and turned onto the surface when it is presented: the
+ * present is already one textured quad of the panel's frame buffer (F69), so the rotation costs no extra pass.
+ * Touch is turned back the same way before IGraphics sees it. The vc4's primary plane can rotate by 180 only (and
+ * reflect), and a plane property would stay set when the CRTC goes back to whoever had it (the host's fbdev panel),
+ * so the plane is never rotated: the GPU does it, for all four.
+ *
  * There is no event loop: the program that owns the process calls PollInput() and
  * RenderFrame() from its main loop (the appliance's main loop, or a test driver).
  *
@@ -70,7 +78,9 @@ public:
     IColor matte = IColor(255, 12, 12, 14);       // dead space around the panel: the default band colour
                                                   // (IGraphics::SetLetterboxDrawFunc() replaces it)
     std::string touchDevice;                      // evdev node ("" = none, "auto" = first INPUT_PROP_DIRECT device)
-    bool touchSwapXY = false, touchInvertX = false, touchInvertY = false;
+    bool touchSwapXY = false, touchInvertX = false, touchInvertY = false; // align the touch axes with the scan-out
+    int rotation = 0;                             // degrees clockwise, 0 / 90 / 180 / 270: the UI (landscape) turned
+                                                  // onto the scan-out, touches turned back (others: 0, logged)
     bool logInput = false;                        // one stderr line per dispatched touch event
     double maxFps = 0.;                           // > 0: frames start at most this often (dropped, not queued)
     bool overlap = true;                          // kms: queue the flip and return (CPU / GPU overlap)
@@ -185,11 +195,50 @@ public:
 
   /** Inverse of the touch mapping: the raw device coordinates that land on UI point (x, y). */
   bool UIToRawTouch(float x, float y, int& rawX, int& rawY) const;
-  /** The raw device coordinates for a surface pixel. */
+  /** The raw device coordinates for a pixel of the logical (rotated) surface: LogicalWidth() x LogicalHeight(),
+   * the surface itself when not rotated. */
   void SurfaceToRawTouch(float sx, float sy, int& rawX, int& rawY) const;
+
+  /** The surface (the scan-out, the GBM / pbuffer size). */
+  /** Raw touch device coordinates -> view units (what IGraphics::OnMouseDown() etc. take), the mapping PollInput()
+   * dispatches with: the device range onto the scan-out (Config::touchSwapXY / touchInvertX / touchInvertY first),
+   * then turned back by the rotation into the logical space, then divided by the draw scale. \p sx / \p sy, when
+   * given, get the logical surface pixel. Inline (members only), so a program that has IGraphicsKMS in a module can
+   * call it too. */
+  void RawTouchToView(int rawX, int rawY, float& x, float& y, float* sx = nullptr, float* sy = nullptr) const
+  {
+    float nx = (rawX - mAbsMinX) / static_cast<float>(mAbsMaxX - mAbsMinX + 1);
+    float ny = (rawY - mAbsMinY) / static_cast<float>(mAbsMaxY - mAbsMinY + 1);
+    if (mTouchSwapXY) { const float t = nx; nx = ny; ny = t; }
+    if (mTouchInvertX) nx = 1.f - nx;
+    if (mTouchInvertY) ny = 1.f - ny;
+    // the scan-out's pixels, then the logical (rotated) space the panel is fitted into, turned back the other way
+    const float px = nx * mSurfaceW, py = ny * mSurfaceH;
+    float lx = px, ly = py;
+    switch (mRotation)
+    {
+      case 90:  lx = py;             ly = mSurfaceW - px; break;
+      case 180: lx = mSurfaceW - px; ly = mSurfaceH - py; break;
+      case 270: lx = mSurfaceH - py; ly = px;             break;
+      default: break;
+    }
+    if (sx) *sx = lx;
+    if (sy) *sy = ly;
+    // view units (logical pixels / draw scale): IGraphics takes the letterbox offset off (ViewToUI)
+    x = lx / GetDrawScale();
+    y = ly / GetDrawScale();
+  }
+
+  /** The raw range RawTouchToView() maps from when no device is open (a program that reads the touch device itself,
+   * a test); OpenTouch() sets it from the device. */
+  void SetTouchRange(int minX, int maxX, int minY, int maxY) { mAbsMinX = minX; mAbsMaxX = maxX; mAbsMinY = minY; mAbsMaxY = maxY; }
 
   int SurfaceWidth() const { return mSurfaceW; }
   int SurfaceHeight() const { return mSurfaceH; }
+  /** The rotation in force (Config::rotation, validated) and the logical space the UI is fitted into. */
+  int Rotation() const { return mRotation; }
+  int LogicalWidth() const { return (mRotation == 90 || mRotation == 270) ? mSurfaceH : mSurfaceW; }
+  int LogicalHeight() const { return (mRotation == 90 || mRotation == 270) ? mSurfaceW : mSurfaceH; }
   float FitScale() const { return GetDrawScale(); }
   float OffsetX() const { return GetLetterboxOffsetX(); }
   float OffsetY() const { return GetLetterboxOffsetY(); }
@@ -249,16 +298,20 @@ private:
   /** The surface region this frame must present: its dirty rects in surface pixels, plus what the
    * frames since this back buffer was last on screen changed (buffer age). Empty: everything. */
   IRECT PresentRegionFor(const IRECTList& panelRects);
+  /** A rect in the logical (rotated) space -> the surface's pixels. */
+  IRECT LogicalToSurface(const IRECT& r) const;
   void* mEGLDisplay = nullptr;
   void* mEGLContext = nullptr;
   void* mEGLSurface = nullptr;
   int mSurfaceW = 0, mSurfaceH = 0;
+  int mRotation = 0;            // Config::rotation, validated at OpenWindow()
   bool mFlipPending = false;
 
   int mTouchFD = -1;
   std::string mTouchName;
   int mAbsMinX = 0, mAbsMaxX = 0, mAbsMinY = 0, mAbsMaxY = 0;
   bool mTouchMT = false;
+  bool mTouchSwapXY = false, mTouchInvertX = false, mTouchInvertY = false; // Config's, at OpenWindow()
   int mRawX = 0, mRawY = 0;
   bool mTouchDown = false, mTouchWasDown = false, mTouchMoved = false;
   float mLastX = 0.f, mLastY = 0.f;

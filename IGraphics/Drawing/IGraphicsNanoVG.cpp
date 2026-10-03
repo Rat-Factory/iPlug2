@@ -562,7 +562,16 @@ void IGraphicsNanoVG::EndFrame()
       glDisable(GL_SCISSOR_TEST);
     nvgBeginFrame(mVG, mPresentW / ss, mPresentH / ss, ss);
     if (partial)
-      nvgScissor(mVG, pr.L / ss, pr.T / ss, pr.W() / ss, pr.H() / ss);
+      nvgScissor(mVG, pr.L / ss, pr.T / ss, pr.W() / ss, pr.H() / ss); // surface pixels: before the rotation
+    // a rotated screen: the logical (landscape) space turned clockwise onto the surface, so that logical (0, 0) lands
+    // on the surface's top right (90), bottom right (180) or bottom left (270)
+    switch (mPresentRotation)
+    {
+      case 90:  nvgTranslate(mVG, mPresentW / ss, 0.f);           nvgRotate(mVG, NVG_PI * 0.5f); break;
+      case 180: nvgTranslate(mVG, mPresentW / ss, mPresentH / ss); nvgRotate(mVG, NVG_PI);        break;
+      case 270: nvgTranslate(mVG, 0.f, mPresentH / ss);           nvgRotate(mVG, NVG_PI * 1.5f); break;
+      default: break;
+    }
     const float x = mPresentX / ss, y = mPresentY / ss;
     NVGpaint img = nvgImagePattern(mVG, x, y, WindowWidth(), WindowHeight(), 0, mMainFrameBuffer->image, 1.0f);
     nvgBeginPath(mVG);

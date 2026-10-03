@@ -154,6 +154,14 @@ public:
    * the current picture (EGL buffer age). An empty rect presents the whole surface. */
   void SetPresentRegion(const IRECT& r) { mPresentRegion = r; }
 
+  /** With a present target: turn the panel \p degrees clockwise (0, 90, 180 or 270) as it is composited into the
+   * surface, for a screen whose scan-out is not the UI's orientation (a portrait panel showing a landscape UI). The
+   * present target's x / y and the panel are then in the rotated (logical) space, surfaceW x surfaceH stay the
+   * surface's own; at 90 / 270 the logical space is surfaceH x surfaceW. The present region stays in surface pixels.
+   * The composite is the same single textured quad either way: no extra pass. */
+  void SetPresentRotation(int degrees) { mPresentRotation = (degrees == 90 || degrees == 180 || degrees == 270) ? degrees : 0; }
+  int GetPresentRotation() const { return mPresentRotation; }
+
 protected:
   /** Called by EndFrame() once the panel's frame buffer has been flushed to the GPU and before
    * it is presented (composited into the window surface). A platform can time the two GPU stages
@@ -207,6 +215,7 @@ private:
   float mPresentX = 0.f, mPresentY = 0.f;
   IColor mPresentMatte = COLOR_BLACK;
   IRECT mPresentRegion;
+  int mPresentRotation = 0;
 };
 
 END_IGRAPHICS_NAMESPACE
