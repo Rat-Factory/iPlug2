@@ -181,6 +181,8 @@ void IGraphicsMac::PointToScreen(float& x, float& y) const
 {
   if (mView)
   {
+    // view units (as ScreenToPoint() returns them and the view's mouse events deliver them), so MoveMouseCursor()
+    // and GetMouseLocation() / the stored cursor position agree while letterboxed; a UI point needs UIToView() first
     x *= GetDrawScale();
     y *= GetDrawScale();
     NSWindow* pWindow = [(IGRAPHICS_VIEW*) mView window];
@@ -200,6 +202,7 @@ void IGraphicsMac::ScreenToPoint(float& x, float& y) const
     NSPoint wndpt = [pWindow convertRectFromScreen: NSMakeRect(x, y, 0.0, 0.0)].origin;
     NSPoint pt = [(IGRAPHICS_VIEW*) mView convertPoint:NSMakePoint(wndpt.x, wndpt.y) fromView:nil];
 
+    // view units, as the view's mouse events deliver them (IGraphics takes a letterbox offset off itself)
     x = pt.x / GetDrawScale();
     y = pt.y / GetDrawScale();
   }

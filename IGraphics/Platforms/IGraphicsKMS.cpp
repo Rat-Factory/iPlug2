@@ -118,6 +118,14 @@ void* IGraphicsKMS::OpenWindow(void* pWindow)
     return nullptr;
   }
 
+  mRotation = (cfg.rotation == 90 || cfg.rotation == 180 || cfg.rotation == 270) ? cfg.rotation : 0;
+  if (cfg.rotation != mRotation)
+    fprintf(stderr, "IGraphicsKMS: rotation %d is not 0, 90, 180 or 270; not rotated\n", cfg.rotation);
+
+  mTouchSwapXY = cfg.touchSwapXY;
+  mTouchInvertX = cfg.touchInvertX;
+  mTouchInvertY = cfg.touchInvertY;
+
   mWindowOpen = true;
   mVisible = !cfg.startHidden;
   mSuppressTouch = false;
@@ -125,20 +133,32 @@ void* IGraphicsKMS::OpenWindow(void* pWindow)
   OnViewInitialized(nullptr);   // nvgCreateGLES2 on the current context
   SetScreenScale(1.f);
 
-  // F69: uniform scale to fit the surface, centred; the panel's own layout is untouched.
-  mFitScale = 1.f;
+  // F69: IGraphics letterboxes the panel in the surface (FitToContainer: uniform scale, centred, the bands drawn
+  // by the letterbox draw function in the panel's frame buffer, which then covers the whole surface); the panel's
+  // own layout is untouched. The matte stays the default band colour, and fills the surface around the panel
+  // when fit is off (1:1, top left).
+  // Letterboxing is opt-in in IGraphics (a plug-in or desktop window keeps the UI's aspect instead); a screen has
+  // the aspect it has, so the full-screen KMS path opts in whenever it fits.
+  SetLetterboxColor(cfg.matte);
+  EnableLetterbox(cfg.fit);
+  // a rotated screen: the panel fits the rotated (logical) space; the present turns it onto the surface
+  const int logicalW = LogicalWidth(), logicalH = LogicalHeight();
   if (cfg.fit)
-    mFitScale = std::min(mSurfaceW / static_cast<float>(Width()), mSurfaceH / static_cast<float>(Height()));
-  Resize(Width(), Height(), mFitScale, false);
-  mFitScale = GetDrawScale(); // after Clip(min, max scale)
-  const float panelW = WindowWidth(), panelH = WindowHeight();
-  mOffX = cfg.fit ? std::floor((mSurfaceW - panelW) * 0.5f) : 0.f;
-  mOffY = cfg.fit ? std::floor((mSurfaceH - panelH) * 0.5f) : 0.f;
-  SetPresentTarget(mSurfaceW, mSurfaceH, mOffX, mOffY, cfg.matte);
+    FitToContainer(logicalW, logicalH, false);
+  else
+    Resize(Width(), Height(), 1.f, false);
+  const float fitScale = GetDrawScale(); // after Clip(min, max scale)
+  const IRECT panel = GetLetterboxPanelBounds();
+  const float panelW = std::round(panel.W() * fitScale), panelH = std::round(panel.H() * fitScale);
+  SetPresentTarget(mSurfaceW, mSurfaceH, 0.f, 0.f, cfg.matte); // the frame buffer is the whole surface when letterboxed
+  SetPresentRotation(mRotation);
 
-  fprintf(stderr, "IGraphicsKMS: %s %dx%d, panel %dx%d at scale %.4f -> %.0fx%.0f at (%.0f, %.0f), %s%s\n",
-          mSurfaceless ? "surfaceless" : mOffscreen ? "offscreen" : "kms", mSurfaceW, mSurfaceH, Width(), Height(), mFitScale,
-          panelW, panelH, mOffX, mOffY, cfg.rgb565 ? "RGB565" : "XRGB8888", mVisible ? "" : ", hidden (the screen is left as it is)");
+  char rotated[64] = "";
+  if (mRotation)
+    snprintf(rotated, sizeof(rotated), ", rotated %d cw (landscape %dx%d)", mRotation, logicalW, logicalH);
+  fprintf(stderr, "IGraphicsKMS: %s %dx%d%s, panel %dx%d at scale %.4f -> %.0fx%.0f at (%.0f, %.0f), %s%s\n",
+          mSurfaceless ? "surfaceless" : mOffscreen ? "offscreen" : "kms", mSurfaceW, mSurfaceH, rotated, Width(), Height(), fitScale,
+          panelW, panelH, GetLetterboxOffsetX(), GetLetterboxOffsetY(), cfg.rgb565 ? "RGB565" : "XRGB8888", mVisible ? "" : ", hidden (the screen is left as it is)");
   fprintf(stderr, "IGraphicsKMS: GL_RENDERER %s | GL_VERSION %s\n",
           (const char*) glGetString(GL_RENDERER), (const char*) glGetString(GL_VERSION));
 
@@ -574,11 +594,14 @@ void IGraphicsKMS::ReleaseTouchInProgress()
       info.y = mLastY;
     }
     else
-      GetMouseDownPoint(info.x, info.y);
+    {
+      GetMouseDownPoint(info.x, info.y); // UI coordinates
+      UIToView(info.x, info.y);
+    }
     info.ms = IMouseMod(false);
     OnMouseUp({info});
     if (Settings().logInput)
-      fprintf(stderr, "touch up   (released on hide) -> ui (%.1f, %.1f)\n", info.x, info.y);
+      fprintf(stderr, "touch up   (released on hide) -> view (%.1f, %.1f)\n", info.x, info.y);
   }
   ReleaseMouseCapture();
   mTouchWasDown = mTouchDown = false;
@@ -761,6 +784,18 @@ int IGraphicsKMS::RenderFrame(bool forceAll)
   return 1;
 }
 
+IRECT IGraphicsKMS::LogicalToSurface(const IRECT& r) const
+{
+  const float w = static_cast<float>(mSurfaceW), h = static_cast<float>(mSurfaceH);
+  switch (mRotation)
+  {
+    case 90:  return IRECT(w - r.B, r.L, w - r.T, r.R);
+    case 180: return IRECT(w - r.R, h - r.B, w - r.L, h - r.T);
+    case 270: return IRECT(r.T, h - r.R, r.B, h - r.L);
+    default:  return r;
+  }
+}
+
 IRECT IGraphicsKMS::PresentRegionFor(const IRECTList& panelRects)
 {
   // this frame's dirty rects, panel units -> surface pixels, grown to whole pixels plus one
@@ -769,7 +804,8 @@ IRECT IGraphicsKMS::PresentRegionFor(const IRECTList& panelRects)
   for (int i = 0; i < panelRects.Size(); i++)
   {
     const IRECT& p = panelRects.Get(i);
-    const IRECT q(std::floor(mOffX + p.L * s) - 1.f, std::floor(mOffY + p.T * s) - 1.f, std::ceil(mOffX + p.R * s) + 1.f, std::ceil(mOffY + p.B * s) + 1.f);
+    const float ox = GetLetterboxOffsetX(), oy = GetLetterboxOffsetY();
+    const IRECT q = LogicalToSurface(IRECT(std::floor(ox + p.L * s) - 1.f, std::floor(oy + p.T * s) - 1.f, std::ceil(ox + p.R * s) + 1.f, std::ceil(oy + p.B * s) + 1.f));
     r = r.Empty() ? q : r.Union(q);
   }
   r = r.Intersect(IRECT(0.f, 0.f, static_cast<float>(mSurfaceW), static_cast<float>(mSurfaceH)));
@@ -982,13 +1018,8 @@ void IGraphicsKMS::PollInput()
 void IGraphicsKMS::DispatchTouch()
 {
   const Config& cfg = Settings();
-  float nx = (mRawX - mAbsMinX) / static_cast<float>(mAbsMaxX - mAbsMinX + 1);
-  float ny = (mRawY - mAbsMinY) / static_cast<float>(mAbsMaxY - mAbsMinY + 1);
-  if (cfg.touchSwapXY) std::swap(nx, ny);
-  if (cfg.touchInvertX) nx = 1.f - nx;
-  if (cfg.touchInvertY) ny = 1.f - ny;
-  const float sx = nx * mSurfaceW, sy = ny * mSurfaceH;
-  const float x = (sx - mOffX) / mFitScale, y = (sy - mOffY) / mFitScale;
+  float sx = 0.f, sy = 0.f, x = 0.f, y = 0.f;
+  RawTouchToView(mRawX, mRawY, x, y, &sx, &sy);
 
   if (mSuppressTouch)
   {
@@ -1029,8 +1060,12 @@ void IGraphicsKMS::DispatchTouch()
   }
 
   if (what && cfg.logInput)
-    fprintf(stderr, "touch %-4s raw (%d, %d) -> surface (%.1f, %.1f) -> ui (%.1f, %.1f)%s\n", what, mRawX, mRawY, sx, sy, x, y,
-            (x < 0 || y < 0 || x > Width() || y > Height()) ? " [matte]" : "");
+  {
+    float ux = x, uy = y;
+    ViewToUI(ux, uy);
+    fprintf(stderr, "touch %-4s raw (%d, %d) -> surface (%.1f, %.1f) -> ui (%.1f, %.1f)%s\n", what, mRawX, mRawY, sx, sy, ux, uy,
+            (ux < 0 || uy < 0 || ux > Width() || uy > Height()) ? " [matte]" : "");
+  }
 
   mLastX = x;
   mLastY = y;
@@ -1040,11 +1075,20 @@ void IGraphicsKMS::DispatchTouch()
 
 void IGraphicsKMS::SurfaceToRawTouch(float sx, float sy, int& rawX, int& rawY) const
 {
-  const Config& cfg = Settings();
-  float nx = (sx + 0.5f) / mSurfaceW, ny = (sy + 0.5f) / mSurfaceH;
-  if (cfg.touchInvertX) nx = 1.f - nx;
-  if (cfg.touchInvertY) ny = 1.f - ny;
-  if (cfg.touchSwapXY) std::swap(nx, ny);
+  // the logical pixel's centre -> the scan-out (RawTouchToView() turned the other way)
+  const float lx = sx + 0.5f, ly = sy + 0.5f;
+  float px = lx, py = ly;
+  switch (mRotation)
+  {
+    case 90:  px = mSurfaceW - ly; py = lx;             break;
+    case 180: px = mSurfaceW - lx; py = mSurfaceH - ly; break;
+    case 270: px = ly;             py = mSurfaceH - lx; break;
+    default: break;
+  }
+  float nx = px / mSurfaceW, ny = py / mSurfaceH;
+  if (mTouchInvertX) nx = 1.f - nx;
+  if (mTouchInvertY) ny = 1.f - ny;
+  if (mTouchSwapXY) std::swap(nx, ny);
   rawX = mAbsMinX + static_cast<int>(nx * (mAbsMaxX - mAbsMinX + 1));
   rawY = mAbsMinY + static_cast<int>(ny * (mAbsMaxY - mAbsMinY + 1));
 }
@@ -1053,7 +1097,8 @@ bool IGraphicsKMS::UIToRawTouch(float x, float y, int& rawX, int& rawY) const
 {
   if (mTouchFD < 0)
     return false;
-  SurfaceToRawTouch(mOffX + x * mFitScale, mOffY + y * mFitScale, rawX, rawY);
+  UIToView(x, y);
+  SurfaceToRawTouch(x * GetDrawScale(), y * GetDrawScale(), rawX, rawY);
   return true;
 }
 

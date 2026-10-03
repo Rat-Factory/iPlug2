@@ -932,6 +932,8 @@ void IGraphicsSkia::PathTransformSetMatrix(const IMatrix& m)
   mClipMatrix = SkMatrix();
   mFinalMatrix = mMatrix;
   globalMatrix.preTranslate(xTranslate, yTranslate);
+  if (mLayers.empty()) // the main surface: the UI at its letterbox offset (F69; 0 when not letterboxed)
+    globalMatrix.postTranslate(GetLetterboxOffsetX() * GetScreenScale(), GetLetterboxOffsetY() * GetScreenScale());
   mClipMatrix.postConcat(globalMatrix);
   mFinalMatrix.postConcat(globalMatrix);
   mCanvas->setMatrix(mFinalMatrix);

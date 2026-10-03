@@ -93,7 +93,122 @@ void IGraphics::Resize(int w, int h, float scale, bool needsPlatformResize)
   
   scale = Clip(scale, mMinScale, mMaxScale);
   
-  if (w == Width() && h == Height() && scale == GetDrawScale()) return;
+  DoResize(w, h, scale, needsPlatformResize, 0, 0, 0.f, 0.f);
+}
+
+// whole window pixels covered by a UI length at a draw scale (WindowWidth()'s truncation, minus float noise:
+// 810 * (600 / 810) is 599.99994)
+static inline int LetterboxPanelPixels(int len, float scale)
+{
+  return static_cast<int>(std::floor(static_cast<float>(len) * scale + 1e-3f));
+}
+
+// the UI's size (constrained as FitToContainer() resizes it) and its uniform fit in a cw x ch container
+static inline bool LetterboxFit(const IGEditorDelegate* pDelegate, int uiW, int uiH, int cw, int ch, float minScale, float maxScale, int& w, int& h, float& scale)
+{
+  w = uiW;
+  h = uiH;
+  pDelegate->ConstrainEditorResize(w, h);
+  if (cw <= 0 || ch <= 0 || w <= 0 || h <= 0)
+    return false;
+  scale = Clip(std::min(static_cast<float>(cw) / static_cast<float>(w), static_cast<float>(ch) / static_cast<float>(h)), minScale, maxScale);
+  return true;
+}
+
+bool IGraphics::NeedsLetterbox(int cw, int ch, int slack) const
+{
+  int w, h;
+  float scale;
+  if (!LetterboxFit(mDelegate, Width(), Height(), cw, ch, mMinScale, mMaxScale, w, h, scale))
+    return false;
+  const int pw = LetterboxPanelPixels(w, scale), ph = LetterboxPanelPixels(h, scale);
+  return std::abs(cw - pw) > slack || std::abs(ch - ph) > slack;
+}
+
+void IGraphics::EnableLetterbox(bool enable)
+{
+  mLetterboxEnabled = enable;
+  if (!enable && IsLetterboxed()) // the window back to the UI's own size, same scale
+    DoResize(Width(), Height(), GetDrawScale(), false, 0, 0, 0.f, 0.f);
+}
+
+bool IGraphics::FitToContainer(int cw, int ch, bool needsPlatformResize)
+{
+  int w, h;
+  float scale;
+  if (!LetterboxFit(mDelegate, Width(), Height(), cw, ch, mMinScale, mMaxScale, w, h, scale))
+    return false;
+
+  const int pw = LetterboxPanelPixels(w, scale), ph = LetterboxPanelPixels(h, scale);
+  const bool mismatch = pw != cw || ph != ch;
+
+  if (!mismatch || !mLetterboxEnabled) // the aspect matches, or letterboxing is off: a plain uniform fit, no bands
+    DoResize(w, h, scale, needsPlatformResize, 0, 0, 0.f, 0.f);
+  else // centred at whole window pixels (negative when the scale constraints leave the UI larger than the container)
+    DoResize(w, h, scale, needsPlatformResize, cw, ch, std::floor((cw - pw) * 0.5f), std::floor((ch - ph) * 0.5f));
+
+  return mismatch;
+}
+
+IRECT IGraphics::GetContainerBounds() const
+{
+  if (!IsLetterboxed())
+    return GetBounds();
+  const float s = GetDrawScale();
+  return IRECT(-mLetterboxX / s, -mLetterboxY / s, (mContainerW - mLetterboxX) / s, (mContainerH - mLetterboxY) / s);
+}
+
+IRECT IGraphics::GetLetterboxPanelBounds() const
+{
+  if (!IsLetterboxed())
+    return GetBounds();
+  const float s = GetDrawScale();
+  return IRECT(0.f, 0.f, LetterboxPanelPixels(Width(), s) / s, LetterboxPanelPixels(Height(), s) / s);
+}
+
+void IGraphics::GetLetterboxBands(IRECTList& bands) const
+{
+  if (!IsLetterboxed())
+    return;
+  const IRECT c = GetContainerBounds();
+  const IRECT p = GetLetterboxPanelBounds().Intersect(c);
+  const IRECT r[4] = {
+    IRECT(c.L, c.T, c.R, p.T),  // top
+    IRECT(c.L, p.B, c.R, c.B),  // bottom
+    IRECT(c.L, p.T, p.L, p.B),  // left
+    IRECT(p.R, p.T, c.R, p.B)}; // right
+  for (const IRECT& b : r)
+    if (b.W() > 0.f && b.H() > 0.f)
+      bands.Add(b);
+}
+
+void IGraphics::DrawLetterbox(const IRECTList& rects)
+{
+  IRECTList bands;
+  GetLetterboxBands(bands);
+  const IRECT panel = GetLetterboxPanelBounds();
+  for (int i = 0; i < bands.Size(); i++)
+  {
+    const IRECT& band = bands.Get(i);
+    // a full redraw, or a region the platform asks for that reaches into the band (CPU backends' expose)
+    bool wanted = mLetterboxDirty;
+    for (int j = 0; j < rects.Size() && !wanted; j++)
+      wanted = rects.Get(j).Intersects(band);
+    if (!wanted)
+      continue;
+    PrepareRegion(band);
+    if (mLetterboxDrawFunc)
+      mLetterboxDrawFunc(*this, band, panel);
+    else
+      FillRect(mLetterboxColor, band);
+    CompleteRegion(band);
+  }
+  mLetterboxDirty = false;
+}
+
+void IGraphics::DoResize(int w, int h, float scale, bool needsPlatformResize, int containerW, int containerH, float offX, float offY)
+{
+  if (w == Width() && h == Height() && scale == GetDrawScale() && containerW == mContainerW && containerH == mContainerH && offX == mLetterboxX && offY == mLetterboxY) return;
   
   //DBGMSG("resize %i, resize %i, scale %f\n", w, h, scale);
   ReleaseMouseCapture();
@@ -101,9 +216,18 @@ void IGraphics::Resize(int w, int h, float scale, bool needsPlatformResize)
   mDrawScale = scale;
   mWidth = w;
   mHeight = h;
+  mContainerW = containerW;
+  mContainerH = containerH;
+  mLetterboxX = offX;
+  mLetterboxY = offY;
+  mLetterboxDirty = true;
   
   if (mCornerResizer)
+  {
     mCornerResizer->OnRescale();
+    // letterboxed, the container sets the size (a full-screen window, a host's fixed rect): no corner drag
+    mCornerResizer->Hide(IsLetterboxed());
+  }
 
   int windowWidth = WindowWidth() * GetPlatformWindowScale();
   int windowHeight = WindowHeight() * GetPlatformWindowScale();
@@ -345,6 +469,7 @@ void IGraphics::AttachCornerResizer(ICornerResizerControl* pControl, EUIResizerM
     mGUISizeMode = sizeMode;
     mLayoutOnResize = layoutOnResize;
     mCornerResizer->SetDelegate(*GetDelegate());
+    mCornerResizer->Hide(IsLetterboxed()); // attached after FitToContainer() (IGraphicsKMS lays out after the fit)
   }
 #else
 DBGMSG("AttachCornerResizer() is disabled for AUv3");
@@ -597,6 +722,7 @@ void IGraphics::ForMatchingControls(T method, int paramIdx, Args... args)
 void IGraphics::SetAllControlsDirty()
 {
   ForAllControls(&IControl::SetDirty, false, -1);
+  mLetterboxDirty = true; // a full redraw: the bands too (no-op when not letterboxed)
 }
 
 void IGraphics::SetAllControlsClean()
@@ -846,7 +972,11 @@ bool IGraphics::IsDirty(IRECTList& rects)
 
   bool dirty = false;
     
-  auto func = [&dirty, &rects](IControl* pControl) {
+  // letterboxed: the controls' rects stop at the UI's edge, so they never draw over the bands
+  const bool letterboxed = IsLetterboxed();
+  const IRECT panel = letterboxed ? GetLetterboxPanelBounds() : IRECT();
+
+  auto func = [&dirty, &rects, letterboxed, &panel](IControl* pControl) {
     if (pControl->IsDirty())
     {
       // N.B padding outlines for single line outlines
@@ -856,13 +986,24 @@ bool IGraphics::IsDirty(IRECTList& rects)
       {
         rectToAdd.Clank(pControl->GetParent()->GetRECT().GetPadded(0.75));
       }
-      
-      rects.Add(rectToAdd);
+
+      if (letterboxed)
+        rectToAdd = rectToAdd.Intersect(panel);
+
+      if (!rectToAdd.Empty())
+        rects.Add(rectToAdd);
       dirty = true;
     }
   };
     
   ForAllControlsFunc(func);
+
+  if (letterboxed && mLetterboxDirty)
+  {
+    // the whole container: the platform presents (or invalidates) all of it
+    rects.Add(GetContainerBounds());
+    dirty = true;
+  }
 
 #ifdef USE_IDLE_CALLS
   if (dirty)
@@ -973,6 +1114,10 @@ void IGraphics::Draw(IRECTList& rects)
     for (auto i = 0; i < rects.Size(); i++)
       Draw(rects.Get(i), scale);
   }
+
+  // after the controls: a band owns the window pixels the UI only partly covers at its edge
+  if (IsLetterboxed())
+    DrawLetterbox(rects);
   
   EndFrame();
 }
@@ -983,8 +1128,18 @@ void IGraphics::SetStrictDrawing(bool strict)
   SetAllControlsDirty();
 }
 
-void IGraphics::OnMouseDown(const std::vector<IMouseInfo>& points)
+// F69: input arrives in view units (window pixels / draw scale); the letterbox offset comes off here
+static std::vector<IMouseInfo> LetterboxViewToUI(const IGraphics& g, const std::vector<IMouseInfo>& viewPoints)
 {
+  std::vector<IMouseInfo> points(viewPoints);
+  for (auto& p : points)
+    g.ViewToUI(p.x, p.y);
+  return points;
+}
+
+void IGraphics::OnMouseDown(const std::vector<IMouseInfo>& viewPoints)
+{
+  const std::vector<IMouseInfo> points = LetterboxViewToUI(*this, viewPoints);
 //  Trace("IGraphics::OnMouseDown", __LINE__, "x:%0.2f, y:%0.2f, mod:LRSCA: %i%i%i%i%i", x, y, mod.L, mod.R, mod.S, mod.C, mod.A);
 
   bool singlePoint = points.size() == 1;
@@ -1069,8 +1224,9 @@ void IGraphics::OnMouseDown(const std::vector<IMouseInfo>& points)
   }
 }
 
-void IGraphics::OnMouseUp(const std::vector<IMouseInfo>& points)
+void IGraphics::OnMouseUp(const std::vector<IMouseInfo>& viewPoints)
 {
+  const std::vector<IMouseInfo> points = LetterboxViewToUI(*this, viewPoints);
 //  Trace("IGraphics::OnMouseUp", __LINE__, "x:%0.2f, y:%0.2f, mod:LRSCA: %i%i%i%i%i", x, y, mod.L, mod.R, mod.S, mod.C, mod.A);
   
   if (ControlIsCaptured())
@@ -1106,12 +1262,13 @@ void IGraphics::OnMouseUp(const std::vector<IMouseInfo>& points)
     EndDragResize();
   }
     
-  if (points.size() == 1 && !points[0].ms.IsTouch())
-    OnMouseOver(points[0].x, points[0].y, points[0].ms);
+  if (viewPoints.size() == 1 && !viewPoints[0].ms.IsTouch())
+    OnMouseOver(viewPoints[0].x, viewPoints[0].y, viewPoints[0].ms);
 }
 
-void IGraphics::OnTouchCancelled(const std::vector<IMouseInfo>& points)
+void IGraphics::OnTouchCancelled(const std::vector<IMouseInfo>& viewPoints)
 {
+  const std::vector<IMouseInfo> points = LetterboxViewToUI(*this, viewPoints);
   if (ControlIsCaptured())
   {
     //work out which of mCapturedMap controls the cancel relates to
@@ -1137,6 +1294,7 @@ void IGraphics::OnTouchCancelled(const std::vector<IMouseInfo>& points)
 
 bool IGraphics::OnMouseOver(float x, float y, const IMouseMod& mod)
 {
+  ViewToUI(x, y);
   Trace("IGraphics::OnMouseOver", __LINE__, "x:%0.2f, y:%0.2f, mod:LRSCA: %i%i%i%i%i",
         x, y, mod.L, mod.R, mod.S, mod.C, mod.A);
   
@@ -1167,8 +1325,9 @@ void IGraphics::OnMouseOut()
   ClearMouseOver();
 }
 
-void IGraphics::OnMouseDrag(const std::vector<IMouseInfo>& points)
+void IGraphics::OnMouseDrag(const std::vector<IMouseInfo>& viewPoints)
 {
+  const std::vector<IMouseInfo> points = LetterboxViewToUI(*this, viewPoints);
   Trace("IGraphics::OnMouseDrag:", __LINE__, "x:%0.2f, y:%0.2f, dX:%0.2f, dY:%0.2f, mod:LRSCA: %i%i%i%i%i",
         points[0].x, points[0].y, points[0].dX, points[0].dY, points[0].ms.L, points[0].ms.R, points[0].ms.S, points[0].ms.C, points[0].ms.A);
 
@@ -1209,6 +1368,7 @@ void IGraphics::OnMouseDrag(const std::vector<IMouseInfo>& points)
 
 bool IGraphics::OnMouseDblClick(float x, float y, const IMouseMod& mod)
 {
+  ViewToUI(x, y);
   Trace("IGraphics::OnMouseDblClick", __LINE__, "x:%0.2f, y:%0.2f, mod:LRSCA: %i%i%i%i%i",
         x, y, mod.L, mod.R, mod.S, mod.C, mod.A);
   
@@ -1221,6 +1381,7 @@ bool IGraphics::OnMouseDblClick(float x, float y, const IMouseMod& mod)
       IMouseInfo info;
       info.x = x;
       info.y = y;
+      UIToView(info.x, info.y); // OnMouseDown() takes view units
       info.ms = mod;
       std::vector<IMouseInfo> list {info};
       OnMouseDown(list);
@@ -1237,6 +1398,7 @@ bool IGraphics::OnMouseDblClick(float x, float y, const IMouseMod& mod)
 
 bool IGraphics::OnMouseWheel(float x, float y, const IMouseMod& mod, float d)
 {
+  ViewToUI(x, y);
   IControl* pControl = GetMouseControl(x, y, false);
   
   if (pControl)
@@ -1247,6 +1409,7 @@ bool IGraphics::OnMouseWheel(float x, float y, const IMouseMod& mod, float d)
 
 bool IGraphics::OnKeyDown(float x, float y, const IKeyPress& key)
 {
+  ViewToUI(x, y);
   Trace("IGraphics::OnKeyDown", __LINE__, "x:%0.2f, y:%0.2f, key:%s",
         x, y, key.utf8);
 
@@ -1265,6 +1428,7 @@ bool IGraphics::OnKeyDown(float x, float y, const IKeyPress& key)
 
 bool IGraphics::OnKeyUp(float x, float y, const IKeyPress& key)
 {
+  ViewToUI(x, y);
   Trace("IGraphics::OnKeyUp", __LINE__, "x:%0.2f, y:%0.2f, key:%s",
         x, y, key.utf8);
   
@@ -1283,12 +1447,14 @@ bool IGraphics::OnKeyUp(float x, float y, const IKeyPress& key)
 
 void IGraphics::OnDrop(const char* str, float x, float y)
 {
+  ViewToUI(x, y);
   IControl* pControl = GetMouseControl(x, y, false);
   if (pControl) pControl->OnDrop(str);
 }
 
 void IGraphics::OnDropMultiple(const std::vector<const char*>& paths, float x, float y)
 {
+  ViewToUI(x, y);
   IControl* pControl = GetMouseControl(x, y, false);
   if (pControl) pControl->OnDropMultiple(paths);
 }
@@ -1364,7 +1530,7 @@ IControl* IGraphics::GetMouseControl(float x, float y, bool capture, bool mouseO
     pControl = mLiveEdit.get();
 #endif
   
-  if (!pControl && mCornerResizer && mCornerResizer->GetRECT().Contains(x, y))
+  if (!pControl && mCornerResizer && !mCornerResizer->IsHidden() && mCornerResizer->GetRECT().Contains(x, y))
     pControl = mCornerResizer.get();
   
   if (!pControl && mPerfDisplay && mPerfDisplay->GetRECT().Contains(x, y))
@@ -1483,6 +1649,7 @@ void IGraphics::PopupHostContextMenuForParam(IControl* pControl, int paramIdx, f
       
       populateFunc(&contextMenu);
      
+      UIToView(x, y); // letterboxed: the UI's offset in the view
 #ifdef OS_WIN
       x *= GetTotalScale();
       y *= GetTotalScale();
@@ -2362,6 +2529,7 @@ void IGraphics::SetQwertyMidiKeyHandlerFunc(std::function<void(const IMidiMsg& m
 
 bool IGraphics::RespondsToGesture(float x, float y)
 {
+  ViewToUI(x, y); // view units from the platform, as OnGestureRecognized()
   IControl* pControl = GetMouseControl(x, y, false, false);
 
   if(pControl && pControl->GetWantsGestures())
@@ -2380,8 +2548,10 @@ bool IGraphics::RespondsToGesture(float x, float y)
   return false;
 }
 
-void IGraphics::OnGestureRecognized(const IGestureInfo& info)
+void IGraphics::OnGestureRecognized(const IGestureInfo& viewInfo)
 {
+  IGestureInfo info = viewInfo;
+  ViewToUI(info.x, info.y);
   IControl* pControl = GetMouseControl(info.x, info.y, false, false);
 
   if(pControl && pControl->GetWantsGestures())

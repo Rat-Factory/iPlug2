@@ -27,11 +27,13 @@ BEGIN_IGRAPHICS_NAMESPACE
 
 inline NSRect ToNSRect(IGraphics* pGraphics, const IRECT& bounds)
 {
+  // UI coordinates -> the view's points (letterboxed: plus the UI's offset in the view, F69)
   const float scale = pGraphics->GetDrawScale();
-  const float x = floor(bounds.L * scale);
-  const float y = floor(bounds.T * scale);
-  const float x2 = ceil(bounds.R * scale);
-  const float y2 = ceil(bounds.B * scale);
+  const float ox = pGraphics->GetLetterboxOffsetX(), oy = pGraphics->GetLetterboxOffsetY();
+  const float x = floor(ox + bounds.L * scale);
+  const float y = floor(oy + bounds.T * scale);
+  const float x2 = ceil(ox + bounds.R * scale);
+  const float y2 = ceil(oy + bounds.B * scale);
     
   return NSMakeRect(x, y, x2 - x, y2 - y);
 }
@@ -39,8 +41,8 @@ inline NSRect ToNSRect(IGraphics* pGraphics, const IRECT& bounds)
 inline IRECT ToIRECT(IGraphics* pGraphics, const NSRect* pNSRect)
 {
   const float scale = 1.f/pGraphics->GetDrawScale();
-  const float x = pNSRect->origin.x;
-  const float y = pNSRect->origin.y;
+  const float x = pNSRect->origin.x - pGraphics->GetLetterboxOffsetX();
+  const float y = pNSRect->origin.y - pGraphics->GetLetterboxOffsetY();
   const float w = pNSRect->size.width;
   const float h = pNSRect->size.height;
   
