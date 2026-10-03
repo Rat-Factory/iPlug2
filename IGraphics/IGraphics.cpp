@@ -439,6 +439,7 @@ void IGraphics::AttachCornerResizer(ICornerResizerControl* pControl, EUIResizerM
     mGUISizeMode = sizeMode;
     mLayoutOnResize = layoutOnResize;
     mCornerResizer->SetDelegate(*GetDelegate());
+    mCornerResizer->Hide(IsLetterboxed()); // attached after FitToContainer() (IGraphicsKMS lays out after the fit)
   }
 #else
 DBGMSG("AttachCornerResizer() is disabled for AUv3");
