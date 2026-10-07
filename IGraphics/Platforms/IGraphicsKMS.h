@@ -267,9 +267,11 @@ private:
   void ShutdownDisplay();
   bool Present();
   uint32_t FramebufferForBO(gbm_bo* bo);
-  bool OpenTouch(const std::string& path);
+  bool OpenTouch(const std::string& path, bool quiet = false);
   void DispatchTouch();
   void DrainTouch();
+  void TouchGone();
+  void RetryTouch();
   void ReleaseTouchInProgress();
   bool RestoreSavedCrtc();
 
@@ -309,6 +311,8 @@ private:
 
   int mTouchFD = -1;
   std::string mTouchName;
+  std::string mTouchWanted, mTouchPath; // Config::touchDevice and the node it opened, for a reopen
+  double mTouchRetryAt = 0.0;           // monotonic seconds: the next reopen of a device that went away
   int mAbsMinX = 0, mAbsMaxX = 0, mAbsMinY = 0, mAbsMaxY = 0;
   bool mTouchMT = false;
   bool mTouchSwapXY = false, mTouchInvertX = false, mTouchInvertY = false; // Config's, at OpenWindow()
