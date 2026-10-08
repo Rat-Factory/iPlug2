@@ -185,6 +185,7 @@ void IGraphicsKMS::CloseWindow()
     close(mTouchFD);
     mTouchFD = -1;
   }
+  mTouchWanted.clear();
   ShutdownDisplay();
 }
 
@@ -565,7 +566,13 @@ void IGraphicsKMS::DrainTouch()
   if (mTouchFD < 0)
     return;
   input_event ev[64];
-  while (read(mTouchFD, ev, sizeof(ev)) > 0) {}
+  ssize_t n;
+  while ((n = read(mTouchFD, ev, sizeof(ev))) > 0) {}
+  if (n < 0 && errno != EAGAIN && errno != EINTR)
+  {
+    TouchGone();
+    return;
+  }
   // where the finger is now: a touch that began while hidden is not a press on this panel
   unsigned long keys[(KEY_MAX + 8 * sizeof(long)) / (8 * sizeof(long))] = {0};
   const bool down = ioctl(mTouchFD, EVIOCGKEY(sizeof(keys)), keys) >= 0 && (TestBit(keys, BTN_TOUCH) || TestBit(keys, BTN_LEFT));
@@ -919,8 +926,9 @@ bool IGraphicsKMS::ReadPanel(std::vector<uint8_t>& rgba, int& w, int& h)
 
 #pragma mark - touch
 
-bool IGraphicsKMS::OpenTouch(const std::string& wanted)
+bool IGraphicsKMS::OpenTouch(const std::string& wanted, bool quiet)
 {
+  mTouchWanted = wanted;
   std::vector<std::string> candidates;
   if (wanted == "auto")
   {
@@ -941,7 +949,7 @@ bool IGraphicsKMS::OpenTouch(const std::string& wanted)
     const int fd = open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0)
     {
-      if (wanted != "auto") fprintf(stderr, "IGraphicsKMS: open %s: %s\n", path.c_str(), strerror(errno));
+      if (wanted != "auto" && !quiet) fprintf(stderr, "IGraphicsKMS: open %s: %s\n", path.c_str(), strerror(errno));
       continue;
     }
     unsigned long props[1] = {0}, absBits[(ABS_MAX + 8 * sizeof(long)) / (8 * sizeof(long))] = {0};
@@ -964,6 +972,7 @@ bool IGraphicsKMS::OpenTouch(const std::string& wanted)
     mAbsMinX = ax.minimum; mAbsMaxX = ax.maximum; mAbsMinY = ay.minimum; mAbsMaxY = ay.maximum;
     mRawX = ax.value; mRawY = ay.value; // the kernel drops a repeated value, so start from the current one
     mTouchName = name;
+    mTouchPath = path;
     mTouchFD = fd;
     input_absinfo mtx = {}, mty = {}, slot = {};
     if (hasMT)
@@ -979,12 +988,35 @@ bool IGraphicsKMS::OpenTouch(const std::string& wanted)
       fprintf(stderr, "; MT X %d..%d Y %d..%d, slots %d\n", mtx.minimum, mtx.maximum, mty.minimum, mty.maximum, slot.maximum + 1);
     return true;
   }
-  fprintf(stderr, "IGraphicsKMS: no touch device (%s)\n", wanted.c_str());
+  if (!quiet)
+    fprintf(stderr, "IGraphicsKMS: no touch device (%s)\n", wanted.c_str());
   return false;
+}
+
+// The device went away (unplugged, or its USB port reset: read() fails with ENODEV). Its fd would poll
+// readable forever, so it is closed; RetryTouch() opens the new node once a second.
+void IGraphicsKMS::TouchGone()
+{
+  fprintf(stderr, "IGraphicsKMS: touch %s went away (%s); reopening once a second\n", mTouchPath.c_str(), strerror(errno));
+  ReleaseTouchInProgress();
+  close(mTouchFD);
+  mTouchFD = -1;
+  mTouchDown = mTouchWasDown = mTouchMoved = false;
+  mTouchRetryAt = NowSecs() + 1.0;
+}
+
+void IGraphicsKMS::RetryTouch()
+{
+  if (mTouchFD >= 0 || mTouchWanted.empty() || NowSecs() < mTouchRetryAt)
+    return;
+  mTouchRetryAt = NowSecs() + 1.0;
+  if (OpenTouch(mTouchWanted, true))
+    DrainTouch(); // a finger already down on the new device is not a press
 }
 
 void IGraphicsKMS::PollInput()
 {
+  RetryTouch();
   if (mTouchFD < 0)
     return;
   if (!mVisible)
@@ -996,6 +1028,11 @@ void IGraphicsKMS::PollInput()
   for (;;)
   {
     const ssize_t n = read(mTouchFD, ev, sizeof(ev));
+    if (n < 0 && errno != EAGAIN && errno != EINTR)
+    {
+      TouchGone();
+      return;
+    }
     if (n <= 0)
       break;
     for (size_t i = 0; i < n / sizeof(input_event); i++)
