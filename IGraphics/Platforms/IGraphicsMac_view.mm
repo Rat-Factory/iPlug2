@@ -535,9 +535,34 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
   [self render];
 }
 
+- (void) onDisplayLink: (id) pDisplayLink
+{
+  [self render];
+}
+
+// IGRAPHICS_CVDISPLAYLINK paces frames from the display instead of an NSTimer at FPS(). A timer
+// that is not locked to the refresh drifts against it, so now and then a frame lands two
+// refreshes late. It is opt-in per plug-in, so the rest of the catalogue keeps the timer.
+//
+// On macOS 14 and later it uses the view's own display link: it follows the view between
+// screens, stops while the view is off screen, and is asked for FPS() so a 120 Hz display
+// does not double the UI's work. Earlier systems use CVDisplayLink, which runs at the
+// display's rate and has to be pointed at the window's screen by hand: in
+// updateDisplayLinkDisplay, when the view joins a window and when the window changes screens.
+// setTimer runs from initWithIGraphics:, before there is a window, so it cannot do that itself.
 - (void) setTimer
 {
 #ifdef IGRAPHICS_CVDISPLAYLINK
+  if (@available(macOS 14.0, *))
+  {
+    CADisplayLink* pLink = [self displayLinkWithTarget:self selector:@selector(onDisplayLink:)];
+    const float fps = (float) mGraphics->FPS();
+    pLink.preferredFrameRateRange = CAFrameRateRangeMake(fps, fps, fps);
+    [pLink addToRunLoop:[NSRunLoop currentRunLoop] forMode:NSRunLoopCommonModes];
+    mViewDisplayLink = [pLink retain];
+    return;
+  }
+
   mDisplaySource = dispatch_source_create(DISPATCH_SOURCE_TYPE_DATA_ADD, 0, 0, dispatch_get_main_queue());
   dispatch_source_set_event_handler(mDisplaySource, ^(){
     [self render];
@@ -559,12 +584,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
   CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext(mDisplayLink, cglContext, cglPixelFormat);
   #endif
   
-  CGDirectDisplayID viewDisplayID =
-      (CGDirectDisplayID) [self.window.screen.deviceDescription[@"NSScreenNumber"] unsignedIntegerValue];;
-
-  cvReturn = CVDisplayLinkSetCurrentCGDisplay(mDisplayLink, viewDisplayID);
-
-  assert(cvReturn == kCVReturnSuccess);
+  [self updateDisplayLinkDisplay];
   
   CVDisplayLinkStart(mDisplayLink);
 #else
@@ -574,13 +594,56 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
 #endif
 }
 
+// Points the CVDisplayLink at the screen the window is on. Without a window or a screen it
+// leaves the link where it is: CVDisplayLinkCreateWithActiveCGDisplays starts it on a display
+// that exists, which is better than display 0.
+- (void) updateDisplayLinkDisplay
+{
+#ifdef IGRAPHICS_CVDISPLAYLINK
+  if (!mDisplayLink)
+    return;
+  
+  NSScreen* pScreen = [[self window] screen];
+  
+  if (!pScreen)
+    return;
+  
+  const CGDirectDisplayID displayID =
+    (CGDirectDisplayID) [pScreen.deviceDescription[@"NSScreenNumber"] unsignedIntValue];
+  
+  if (displayID != CVDisplayLinkGetCurrentCGDisplay(mDisplayLink))
+    CVDisplayLinkSetCurrentCGDisplay(mDisplayLink, displayID);
+#endif
+}
+
+- (void) windowDidChangeScreen: (NSNotification*) pNotification
+{
+  [self updateDisplayLinkDisplay];
+}
+
 - (void) killTimer
 {
 #ifdef IGRAPHICS_CVDISPLAYLINK
-  CVDisplayLinkStop(mDisplayLink);
-  dispatch_source_cancel(mDisplaySource);
-  CVDisplayLinkRelease(mDisplayLink);
-  mDisplayLink = nil;
+  if (mViewDisplayLink)
+  {
+    [mViewDisplayLink invalidate];
+    [mViewDisplayLink release];
+    mViewDisplayLink = nil;
+  }
+  
+  if (mDisplayLink)
+  {
+    CVDisplayLinkStop(mDisplayLink);
+    CVDisplayLinkRelease(mDisplayLink);
+    mDisplayLink = nil;
+  }
+  
+  if (mDisplaySource)
+  {
+    dispatch_source_cancel(mDisplaySource);
+    dispatch_release(mDisplaySource);
+    mDisplaySource = nil;
+  }
 #else
   [mTimer invalidate];
   mTimer = nullptr;
@@ -641,6 +704,15 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
 
     if (mGraphics)
       mGraphics->SetScreenScale(newScale);
+    
+    #ifdef IGRAPHICS_CVDISPLAYLINK
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:NSWindowDidChangeScreenNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(windowDidChangeScreen:)
+                                                 name:NSWindowDidChangeScreenNotification
+                                               object:pWindow];
+    [self updateDisplayLinkDisplay];
+    #endif
     
     #if defined IGRAPHICS_METAL || defined IGRAPHICS_GLES2 || defined IGRAPHICS_GLES3
     [[NSNotificationCenter defaultCenter] addObserver:self
