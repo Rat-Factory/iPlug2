@@ -185,6 +185,11 @@ typedef struct MNVGfragUniforms MNVGfragUniforms;
 @property (nonatomic, strong) id<MTLRenderPipelineState> pipelineState;
 @property (nonatomic, strong) id<MTLRenderPipelineState>
     stencilOnlyPipelineState;
+// Every pipeline pair built so far, keyed by pixel format and blend factors (see
+// updateRenderPipelineStatesForBlend:pixelFormat:).
+@property (nonatomic, strong)
+    NSMutableDictionary<NSNumber*, NSArray<id<MTLRenderPipelineState>>*>*
+        pipelineStateCache;
 @property (nonatomic, strong) id<MTLSamplerState> pseudoSampler;
 @property (nonatomic, strong) id<MTLTexture> pseudoTexture;
 @property (nonatomic, strong) MTLVertexDescriptor* vertexDescriptor;
@@ -1301,6 +1306,7 @@ enum MNVGTarget mnvgTarget() {
   _vertexFunction = nil;
   _pipelineState = nil;
   _stencilOnlyPipelineState = nil;
+  _pipelineStateCache = nil;
   _pseudoSampler = nil;
   _pseudoTexture = nil;
   _vertexDescriptor = nil;
@@ -1783,6 +1789,33 @@ error:
     return;
   }
 
+  // Pipelines are kept per (pixel format, blend), not only the last one. A frame renders into
+  // offscreen framebuffers (RGBA8Unorm, see renderCreateTextureWithType) and then into the
+  // layer's drawable (BGRA8Unorm in IGraphicsMac_view.mm), so with a single cached pipeline
+  // every drawn frame missed twice and rebuilt four MTLRenderPipelineState objects on the main
+  // thread: about 15 % of the render time while dragging a knob in a plug-in (Instruments,
+  // M1 Pro). The key space is small and fixed (the pixel formats in use times the composite
+  // operations NanoVG offers), so the cache is never pruned; it goes with the context.
+  _blendFunc->srcRGB = blend->srcRGB;
+  _blendFunc->dstRGB = blend->dstRGB;
+  _blendFunc->srcAlpha = blend->srcAlpha;
+  _blendFunc->dstAlpha = blend->dstAlpha;
+  _piplelinePixelFormat = pixelFormat;
+  NSNumber* key = @(((uint64_t)pixelFormat << 32) |
+                    ((uint64_t)(blend->srcRGB & 0xff) << 24) |
+                    ((uint64_t)(blend->dstRGB & 0xff) << 16) |
+                    ((uint64_t)(blend->srcAlpha & 0xff) << 8) |
+                    (uint64_t)(blend->dstAlpha & 0xff));
+  if (_pipelineStateCache == nil) {
+    _pipelineStateCache = [NSMutableDictionary new];
+  }
+  NSArray<id<MTLRenderPipelineState>>* cached = _pipelineStateCache[key];
+  if (cached != nil) {
+    _pipelineState = cached[0];
+    _stencilOnlyPipelineState = cached[1];
+    return;
+  }
+
   MTLRenderPipelineDescriptor* pipelineStateDescriptor = \
       [MTLRenderPipelineDescriptor new];
 
@@ -1800,10 +1833,6 @@ error:
   colorAttachmentDescriptor.sourceAlphaBlendFactor = blend->srcAlpha;
   colorAttachmentDescriptor.destinationRGBBlendFactor = blend->dstRGB;
   colorAttachmentDescriptor.destinationAlphaBlendFactor = blend->dstAlpha;
-  _blendFunc->srcRGB = blend->srcRGB;
-  _blendFunc->dstRGB = blend->dstRGB;
-  _blendFunc->srcAlpha = blend->srcAlpha;
-  _blendFunc->dstAlpha = blend->dstAlpha;
 
   NSError* error;
   _pipelineState = [_metalLayer.device
@@ -1818,7 +1847,9 @@ error:
                                      error:&error];
   [self checkError:error withMessage:"init pipeline stencil only state"];
 
-  _piplelinePixelFormat = pixelFormat;
+  if (_pipelineState != nil && _stencilOnlyPipelineState != nil) {
+    _pipelineStateCache[key] = @[ _pipelineState, _stencilOnlyPipelineState ];
+  }
 }
 
 // Re-creates stencil texture whenever the specified size is bigger.
