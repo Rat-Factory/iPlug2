@@ -124,6 +124,7 @@ using namespace igraphics;
 {
   CVDisplayLinkRef mDisplayLink;
   dispatch_source_t mDisplaySource;
+  id mViewDisplayLink; // CADisplayLink from -[NSView displayLinkWithTarget:selector:], macOS 14+
   NSTimer* mTimer;
   
   NSTrackingArea* mTrackingArea;
@@ -153,6 +154,7 @@ using namespace igraphics;
 - (void) render;
 - (void) killTimer;
 - (void) onTimer: (NSTimer*) pTimer;
+- (void) updateDisplayLinkDisplay;
 - (void) viewDidChangeEffectiveAppearance;
 //mouse
 - (void) getMouseXY: (NSEvent*) pEvent : (float&) x : (float&) y;
