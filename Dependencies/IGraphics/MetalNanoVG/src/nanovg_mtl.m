@@ -185,6 +185,10 @@ typedef struct MNVGfragUniforms MNVGfragUniforms;
 @property (nonatomic, strong) id<MTLRenderPipelineState> pipelineState;
 @property (nonatomic, strong) id<MTLRenderPipelineState>
     stencilOnlyPipelineState;
+// Built pipeline pairs keyed by pixel format + blend: a frame renders into the RGBA8 frame
+// buffer and then the BGRA8 drawable, which with a single cached pair rebuilt both pipelines
+// twice per frame.
+@property (nonatomic, strong) NSMutableDictionary<NSNumber*, NSArray*>* pipelineCache;
 @property (nonatomic, strong) id<MTLSamplerState> pseudoSampler;
 @property (nonatomic, strong) id<MTLTexture> pseudoTexture;
 @property (nonatomic, strong) MTLVertexDescriptor* vertexDescriptor;
@@ -1301,6 +1305,7 @@ enum MNVGTarget mnvgTarget() {
   _vertexFunction = nil;
   _pipelineState = nil;
   _stencilOnlyPipelineState = nil;
+  _pipelineCache = nil;
   _pseudoSampler = nil;
   _pseudoTexture = nil;
   _vertexDescriptor = nil;
@@ -1487,8 +1492,11 @@ error:
   }
 
 #if TARGET_OS_OSX
-  // Makes mnvgReadPixels() work as expected on Mac.
-  if (s_framebuffer != NULL) {
+  // Makes mnvgReadPixels() work as expected on Mac. Only a managed texture on a GPU with its
+  // own memory needs the copy back; with unified memory (Apple silicon) it is already coherent,
+  // and the blit pass cost every frame-buffer flush.
+  if (s_framebuffer != NULL && colorTexture.storageMode == MTLStorageModeManaged &&
+      !_metalLayer.device.hasUnifiedMemory) {
     id<MTLBlitCommandEncoder> blitCommandEncoder = [_buffers.commandBuffer
         blitCommandEncoder];
     [blitCommandEncoder synchronizeResource:colorTexture];
@@ -1783,6 +1791,22 @@ error:
     return;
   }
 
+  const uint64_t key = ((uint64_t)pixelFormat << 32) | ((uint64_t)(blend->srcRGB & 0xff) << 24) |
+      ((uint64_t)(blend->dstRGB & 0xff) << 16) | ((uint64_t)(blend->srcAlpha & 0xff) << 8) |
+      (uint64_t)(blend->dstAlpha & 0xff);
+  if (_pipelineCache == nil) _pipelineCache = [NSMutableDictionary new];
+  NSArray* cached = _pipelineCache[@(key)];
+  _blendFunc->srcRGB = blend->srcRGB;
+  _blendFunc->dstRGB = blend->dstRGB;
+  _blendFunc->srcAlpha = blend->srcAlpha;
+  _blendFunc->dstAlpha = blend->dstAlpha;
+  _piplelinePixelFormat = pixelFormat;
+  if (cached != nil) {
+    _pipelineState = cached[0];
+    _stencilOnlyPipelineState = cached[1];
+    return;
+  }
+
   MTLRenderPipelineDescriptor* pipelineStateDescriptor = \
       [MTLRenderPipelineDescriptor new];
 
@@ -1800,10 +1824,6 @@ error:
   colorAttachmentDescriptor.sourceAlphaBlendFactor = blend->srcAlpha;
   colorAttachmentDescriptor.destinationRGBBlendFactor = blend->dstRGB;
   colorAttachmentDescriptor.destinationAlphaBlendFactor = blend->dstAlpha;
-  _blendFunc->srcRGB = blend->srcRGB;
-  _blendFunc->dstRGB = blend->dstRGB;
-  _blendFunc->srcAlpha = blend->srcAlpha;
-  _blendFunc->dstAlpha = blend->dstAlpha;
 
   NSError* error;
   _pipelineState = [_metalLayer.device
@@ -1818,7 +1838,8 @@ error:
                                      error:&error];
   [self checkError:error withMessage:"init pipeline stencil only state"];
 
-  _piplelinePixelFormat = pixelFormat;
+  if (_pipelineState != nil && _stencilOnlyPipelineState != nil)
+    _pipelineCache[@(key)] = @[_pipelineState, _stencilOnlyPipelineState];
 }
 
 // Re-creates stencil texture whenever the specified size is bigger.
