@@ -1493,8 +1493,15 @@ error:
   }
 
 #if TARGET_OS_OSX
-  // Makes mnvgReadPixels() work as expected on Mac.
-  if (s_framebuffer != NULL) {
+  // Makes mnvgReadPixels() work as expected on Mac. Only a managed texture on a GPU with its
+  // own memory needs the copy back; with unified memory (Apple silicon) it is already coherent,
+  // and the blit pass cost every frame-buffer flush. hasUnifiedMemory is macOS 10.15+; before
+  // that the blit is always done.
+  BOOL needsSynchronize = colorTexture.storageMode == MTLStorageModeManaged;
+  if (@available(macOS 10.15, *)) {
+    if (_metalLayer.device.hasUnifiedMemory) needsSynchronize = NO;
+  }
+  if (s_framebuffer != NULL && needsSynchronize) {
     id<MTLBlitCommandEncoder> blitCommandEncoder = [_buffers.commandBuffer
         blitCommandEncoder];
     [blitCommandEncoder synchronizeResource:colorTexture];
