@@ -324,7 +324,7 @@ IBitmap IGraphicsNanoVG::LoadBitmap(const char* name, int nStates, bool framesAr
 APIBitmap* IGraphicsNanoVG::LoadAPIBitmap(const char* fileNameOrResID, int scale, EResourceLocation location, const char* ext)
 {
   int idx = 0;
-  int nvgImageFlags = 0;
+  int nvgImageFlags = GetBitmapFilterNearest() ? NVG_IMAGE_NEAREST : 0;
   
   // Preloaded textures are only supported with Metal, not ANGLE/GLES
 #if defined OS_IOS && defined IGRAPHICS_METAL

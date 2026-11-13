@@ -1172,6 +1172,15 @@ public:
   /* Enables layout on resize. This means IGEditorDelegate:LayoutUI() will be called when the GUI is resized */
   void SetLayoutOnResize(bool layoutOnResize);
 
+  /** Sample bitmaps loaded from now on with nearest-neighbour filtering instead of linear, so a
+   * low-resolution bitmap drawn larger keeps hard pixel edges (a pixel-art look). Call before
+   * loading the bitmaps it should apply to. Honoured by the NanoVG backend.
+   * @param nearest \c true for nearest-neighbour, \c false (the default) for linear */
+  void SetBitmapFilterNearest(bool nearest) { mBitmapFilterNearest = nearest; }
+
+  /** @return \c true if bitmaps are loaded with nearest-neighbour filtering */
+  bool GetBitmapFilterNearest() const { return mBitmapFilterNearest; }
+
   /** Gets the width of the graphics context
    * @return A whole number representing the width of the graphics context in pixels on a 1:1 screen */
   int Width() const { return mWidth; }
@@ -1967,6 +1976,7 @@ private:
   bool mShowAreaDrawn = false;
   bool mResizingInProcess = false;
   bool mLayoutOnResize = false;
+  bool mBitmapFilterNearest = false;
   bool mEnableMultiTouch = false;
   EUIResizerMode mGUISizeMode = EUIResizerMode::Scale;
   double mPrevTimestamp = 0.;
