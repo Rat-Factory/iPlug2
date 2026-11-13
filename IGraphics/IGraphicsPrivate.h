@@ -75,6 +75,8 @@
   #define FONT_DESCRIPTOR_TYPE HFONT
 #elif defined OS_WEB
   #define FONT_DESCRIPTOR_TYPE std::pair<WDL_String, WDL_String>*
+#elif defined OS_LINUX
+  #define FONT_DESCRIPTOR_TYPE void* // fonts are files (IGraphicsKMS), no system font descriptor
 #else 
   // NO_IGRAPHICS
 #endif

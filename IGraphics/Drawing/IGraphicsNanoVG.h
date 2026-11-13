@@ -26,6 +26,13 @@
   #include <libGLESv2/angle_gl.h>
 #endif
 #endif
+#if defined OS_LINUX
+  #if defined IGRAPHICS_GLES2
+    #include <GLES2/gl2.h>
+  #elif defined IGRAPHICS_GLES3
+    #include <GLES3/gl3.h>
+  #endif
+#endif
 
   #define NANOVG_FBO_VALID 1
   #include "nanovg_gl_utils.h"
@@ -131,8 +138,42 @@ public:
   bool BitmapExtSupported(const char* ext) override;
 
   void DeleteFBO(NVGframebuffer* pBuffer);
-  
+
+  /** Present the panel into a larger surface (ROADMAP F69 / L9 spike). When \p surfaceW > 0,
+   * EndFrame() composites the main frame buffer (WindowWidth() x WindowHeight()) at (\p x, \p y)
+   * in a surface of \p surfaceW x \p surfaceH pixels and fills the rest with \p matte, so a
+   * full-screen platform (DRM/KMS) can pillarbox / letterbox the panel without touching its layout.
+   * surfaceW = 0 restores the default (the frame buffer fills the viewport). GL backends only. */
+  void SetPresentTarget(int surfaceW, int surfaceH, float x, float y, const IColor& matte)
+  {
+    mPresentW = surfaceW; mPresentH = surfaceH; mPresentX = x; mPresentY = y; mPresentMatte = matte;
+  }
+
+  /** With a present target: restrict the next EndFrame()'s present (matte + composite) to \p r,
+   * in surface pixels, y down. The platform guarantees that the rest of the surface already holds
+   * the current picture (EGL buffer age). An empty rect presents the whole surface. */
+  void SetPresentRegion(const IRECT& r) { mPresentRegion = r; }
+
+  /** With a present target: turn the panel \p degrees clockwise (0, 90, 180 or 270) as it is composited into the
+   * surface, for a screen whose scan-out is not the UI's orientation (a portrait panel showing a landscape UI). The
+   * present target's x / y and the panel are then in the rotated (logical) space, surfaceW x surfaceH stay the
+   * surface's own; at 90 / 270 the logical space is surfaceH x surfaceW. The present region stays in surface pixels.
+   * The composite is the same single textured quad either way: no extra pass. */
+  void SetPresentRotation(int degrees) { mPresentRotation = (degrees == 90 || degrees == 180 || degrees == 270) ? degrees : 0; }
+  int GetPresentRotation() const { return mPresentRotation; }
+
 protected:
+  /** Called by EndFrame() once the panel's frame buffer has been flushed to the GPU and before
+   * it is presented (composited into the window surface). A platform can time the two GPU stages
+   * apart here (IGraphicsKMS --gpu-timing). */
+  virtual void OnPanelFlushed() {}
+
+  /** The panel's own frame buffer (what partial redraws build up), for a platform's read-back. */
+  NVGframebuffer* GetMainFrameBuffer() const { return mMainFrameBuffer; }
+
+  /** Linux GLES2 (IGraphicsKMS): NanoVG's NVG_SCISSOR_HW, read by OnViewInitialized(). */
+  bool mScissorHW = true;
+
   APIBitmap* LoadAPIBitmap(const char* fileNameOrResID, int scale, EResourceLocation location, const char* ext) override;
   APIBitmap* LoadAPIBitmap(const char* name, const void* pData, int dataSize, int scale) override;
   APIBitmap* CreateAPIBitmap(int width, int height, float scale, double drawScale, bool cacheable = false) override;
@@ -170,6 +211,11 @@ private:
   NVGcontext* mVG = nullptr;
   NVGframebuffer* mMainFrameBuffer = nullptr;
   int mInitialFBO = 0;
+  int mPresentW = 0, mPresentH = 0;
+  float mPresentX = 0.f, mPresentY = 0.f;
+  IColor mPresentMatte = COLOR_BLACK;
+  IRECT mPresentRegion;
+  int mPresentRotation = 0;
 };
 
 END_IGRAPHICS_NAMESPACE

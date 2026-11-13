@@ -54,6 +54,9 @@ struct InstanceInfo
  *                                          lock-free, drained on the audio thread
  *    HeadlessProcess(in, out, nFrames)     on the audio thread, nFrames <= blockSize
  *
+ *  and, for a plug-in that takes input, HeadlessSetInputChannels(n) before
+ *  the first block to connect the n input channels the host delivers.
+ *
  *  The idle timer (OnIdle, parameter / MIDI echo to a UI) is the platform
  *  Timer, which on Linux is a thread of its own.
  *
@@ -92,6 +95,14 @@ public:
   /** Renders one block. \p outputs must have MaxNChannels(kOutput) channels of
    *  \p nFrames samples. \p inputs may be nullptr for an instrument. */
   void HeadlessProcess(double** inputs, double** outputs, int nFrames);
+
+  /** Connects input channels [0, n) and disconnects the rest, \p n clamped to
+   *  [0, MaxNChannels(kInput)], so that NInChansConnected() is \p n and
+   *  HeadlessProcess() attaches exactly \p n input planes. The constructor
+   *  connects every input for an effect and none for an instrument; a host
+   *  driving a plug-in that records (an instrument with an input) calls this
+   *  with the count its capture device delivers. Not audio-thread safe. */
+  void HeadlessSetInputChannels(int n);
 
   /** Runs one idle tick (parameter / MIDI echo to a UI, then OnIdle()). Call from
    *  the host's main thread when the plug-in was created with createIdleTimer = false. */

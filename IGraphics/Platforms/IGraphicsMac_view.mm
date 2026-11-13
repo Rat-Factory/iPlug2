@@ -535,9 +535,34 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
   [self render];
 }
 
+- (void) onDisplayLink: (id) pDisplayLink
+{
+  [self render];
+}
+
+// IGRAPHICS_CVDISPLAYLINK paces frames from the display instead of an NSTimer at FPS(). A timer
+// that is not locked to the refresh drifts against it, so now and then a frame lands two
+// refreshes late. It is opt-in per plug-in, so the rest of the catalogue keeps the timer.
+//
+// On macOS 14 and later it uses the view's own display link: it follows the view between
+// screens, stops while the view is off screen, and is asked for FPS() so a 120 Hz display
+// does not double the UI's work. Earlier systems use CVDisplayLink, which runs at the
+// display's rate and has to be pointed at the window's screen by hand: in
+// updateDisplayLinkDisplay, when the view joins a window and when the window changes screens.
+// setTimer runs from initWithIGraphics:, before there is a window, so it cannot do that itself.
 - (void) setTimer
 {
 #ifdef IGRAPHICS_CVDISPLAYLINK
+  if (@available(macOS 14.0, *))
+  {
+    CADisplayLink* pLink = [self displayLinkWithTarget:self selector:@selector(onDisplayLink:)];
+    const float fps = (float) mGraphics->FPS();
+    pLink.preferredFrameRateRange = CAFrameRateRangeMake(fps, fps, fps);
+    [pLink addToRunLoop:[NSRunLoop currentRunLoop] forMode:NSRunLoopCommonModes];
+    mViewDisplayLink = [pLink retain];
+    return;
+  }
+
   mDisplaySource = dispatch_source_create(DISPATCH_SOURCE_TYPE_DATA_ADD, 0, 0, dispatch_get_main_queue());
   dispatch_source_set_event_handler(mDisplaySource, ^(){
     [self render];
@@ -559,12 +584,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
   CVDisplayLinkSetCurrentCGDisplayFromOpenGLContext(mDisplayLink, cglContext, cglPixelFormat);
   #endif
   
-  CGDirectDisplayID viewDisplayID =
-      (CGDirectDisplayID) [self.window.screen.deviceDescription[@"NSScreenNumber"] unsignedIntegerValue];;
-
-  cvReturn = CVDisplayLinkSetCurrentCGDisplay(mDisplayLink, viewDisplayID);
-
-  assert(cvReturn == kCVReturnSuccess);
+  [self updateDisplayLinkDisplay];
   
   CVDisplayLinkStart(mDisplayLink);
 #else
@@ -574,13 +594,56 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
 #endif
 }
 
+// Points the CVDisplayLink at the screen the window is on. Without a window or a screen it
+// leaves the link where it is: CVDisplayLinkCreateWithActiveCGDisplays starts it on a display
+// that exists, which is better than display 0.
+- (void) updateDisplayLinkDisplay
+{
+#ifdef IGRAPHICS_CVDISPLAYLINK
+  if (!mDisplayLink)
+    return;
+  
+  NSScreen* pScreen = [[self window] screen];
+  
+  if (!pScreen)
+    return;
+  
+  const CGDirectDisplayID displayID =
+    (CGDirectDisplayID) [pScreen.deviceDescription[@"NSScreenNumber"] unsignedIntValue];
+  
+  if (displayID != CVDisplayLinkGetCurrentCGDisplay(mDisplayLink))
+    CVDisplayLinkSetCurrentCGDisplay(mDisplayLink, displayID);
+#endif
+}
+
+- (void) windowDidChangeScreen: (NSNotification*) pNotification
+{
+  [self updateDisplayLinkDisplay];
+}
+
 - (void) killTimer
 {
 #ifdef IGRAPHICS_CVDISPLAYLINK
-  CVDisplayLinkStop(mDisplayLink);
-  dispatch_source_cancel(mDisplaySource);
-  CVDisplayLinkRelease(mDisplayLink);
-  mDisplayLink = nil;
+  if (mViewDisplayLink)
+  {
+    [mViewDisplayLink invalidate];
+    [mViewDisplayLink release];
+    mViewDisplayLink = nil;
+  }
+  
+  if (mDisplayLink)
+  {
+    CVDisplayLinkStop(mDisplayLink);
+    CVDisplayLinkRelease(mDisplayLink);
+    mDisplayLink = nil;
+  }
+  
+  if (mDisplaySource)
+  {
+    dispatch_source_cancel(mDisplaySource);
+    dispatch_release(mDisplaySource);
+    mDisplaySource = nil;
+  }
 #else
   [mTimer invalidate];
   mTimer = nullptr;
@@ -641,6 +704,15 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
 
     if (mGraphics)
       mGraphics->SetScreenScale(newScale);
+    
+    #ifdef IGRAPHICS_CVDISPLAYLINK
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:NSWindowDidChangeScreenNotification object:nil];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(windowDidChangeScreen:)
+                                                 name:NSWindowDidChangeScreenNotification
+                                               object:pWindow];
+    [self updateDisplayLinkDisplay];
+    #endif
     
     #if defined IGRAPHICS_METAL || defined IGRAPHICS_GLES2 || defined IGRAPHICS_GLES3
     [[NSNotificationCenter defaultCenter] addObserver:self
@@ -830,6 +902,16 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     {
       std::vector<IMouseInfo> list {info};
       mGraphics->OnMouseDown(list);
+
+      // A press on the corner resizer starts a drag resize: remember where it began, in screen
+      // space and in view points, for mouseDragged:.
+      mResizeTracking = mGraphics->GetResizingInProcess();
+      if (mResizeTracking)
+      {
+        mResizeStartScreen = [NSEvent mouseLocation];
+        mResizeStartViewX = info.x * mGraphics->GetDrawScale();
+        mResizeStartViewY = info.y * mGraphics->GetDrawScale();
+      }
     }
   }
 }
@@ -837,6 +919,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
 - (void) mouseUp: (NSEvent*) pEvent
 {
   IMouseInfo info = [self getMouseLeft:pEvent];
+  mResizeTracking = false;
   if (mGraphics)
   {
     std::vector<IMouseInfo> list {info};
@@ -856,6 +939,18 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
   float prevX = mPrevX;
   float prevY = mPrevY;
   IMouseInfo info = [self getMouseLeft:pEvent];
+  if (mGraphics && mResizeTracking && mGraphics->GetResizingInProcess())
+  {
+    // During a corner drag the view, and in an out-of-process host (Logic's AUHostingService)
+    // the window holding it, move under the pointer as they resize, a moment out of step with
+    // the events. A position read against the view then feeds the resize back into itself and
+    // jitters. Measure the drag in screen space instead: where the corner would be is where it
+    // started plus how far the pointer has moved (screen y runs upward, view y downward).
+    const NSPoint now = [NSEvent mouseLocation];
+    const float scale = mGraphics->GetDrawScale();
+    info.x = (mResizeStartViewX + static_cast<float>(now.x - mResizeStartScreen.x)) / scale;
+    info.y = (mResizeStartViewY + static_cast<float>(mResizeStartScreen.y - now.y)) / scale;
+  }
   if (mGraphics && !mGraphics->IsInPlatformTextEntry())
   {
     info.dX = info.x - prevX;
@@ -1368,12 +1463,36 @@ static void MakeCursorFromName(NSCursor*& cursor, const char *name)
 
   [(CAMetalLayer*)[self layer] setDrawableSize:CGSizeMake(self.frame.size.width * scale,
                                                           self.frame.size.height * scale)];
+
+  [self notifyHostResize];
 }
 #endif
+
+// AUv2 has no host-resize callback (the VST3 and APP wrappers call OnParentWindowResize from their
+// own resize paths): an AU host that resizes the plug-in just changes this view's frame, and
+// without this the drawable grows while the UI does not (uninitialised surface shows). Pass the
+// new size on to the delegate, as the other formats do. A frame IGraphics set itself
+// (PlatformResize, after a corner drag or a Resize()) is the size IGraphics already has, and is
+// not passed on. (Logic does not resize AU views from its window edge at all; this is for hosts
+// that do.)
+- (void) notifyHostResize
+{
+#if defined(AU_API)
+  if (!mGraphics)
+    return;
+  const int w = static_cast<int>(self.frame.size.width);
+  const int h = static_cast<int>(self.frame.size.height);
+  if (w > 0 && h > 0 && (w != mGraphics->WindowWidth() || h != mGraphics->WindowHeight()))
+  {
+    mGraphics->GetDelegate()->OnParentWindowResize(w, h);
+  }
+#endif
+}
 #if defined IGRAPHICS_GL2 || defined IGRAPHICS_GL3
 - (void) frameDidChange:(NSNotification*) pNotification
 {
   [self activateGLContext];
+  [self notifyHostResize];
 }
 #endif
 

@@ -174,7 +174,7 @@ void IGraphicsWin::OnDisplayTimer(int vBlankCount)
 
     for (int i = 0; i < rects.Size(); i++)
     {
-      IRECT dirtyR = rects.Get(i);
+      IRECT dirtyR = UIToView(rects.Get(i)); // letterboxed: the UI's offset in the window (F69)
       dirtyR.Scale(totalScale);
       dirtyR.PixelAlign();
       RECT r = { (LONG)dirtyR.L, (LONG)dirtyR.T, (LONG)dirtyR.R, (LONG)dirtyR.B };
@@ -183,7 +183,7 @@ void IGraphicsWin::OnDisplayTimer(int vBlankCount)
 
     if (mParamEditWnd)
     {
-      IRECT notDirtyR = mEditRECT;
+      IRECT notDirtyR = UIToView(mEditRECT);
       notDirtyR.Scale(totalScale);
       notDirtyR.PixelAlign();
       RECT r2 = { (LONG)notDirtyR.L, (LONG)notDirtyR.T, (LONG)notDirtyR.R, (LONG)notDirtyR.B };
@@ -533,6 +533,7 @@ LRESULT CALLBACK IGraphicsWin::WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARA
       auto addDrawRect = [pGraphics, scale](IRECTList& rects, RECT r) {
         IRECT ir(r.left, r.top, r.right, r.bottom);
         ir.Scale(1.f/scale);
+        ir = pGraphics->ViewToUI(ir); // window region -> UI coordinates (letterboxed: minus the UI's offset, F69)
         ir.PixelAlign();
         rects.Add(ir);
       };
@@ -1348,9 +1349,10 @@ IPopupMenu* IGraphicsWin::CreatePlatformPopupMenu(IPopupMenu& menu, const IRECT 
 
     POINT cPos;
     const float scale = GetTotalScale();
+    const IRECT viewBounds = UIToView(bounds); // letterboxed: the UI's offset in the window (F69)
 
-    cPos.x = bounds.L * scale;
-    cPos.y = bounds.B * scale;
+    cPos.x = viewBounds.L * scale;
+    cPos.y = viewBounds.B * scale;
 
     ::ClientToScreen(mPlugWnd, &cPos);
 
@@ -1407,7 +1409,7 @@ void IGraphicsWin::CreatePlatformTextEntry(int paramIdx, const IText& text, cons
   }
 
   const float scale = GetTotalScale();
-  IRECT scaledBounds = bounds.GetScaled(scale);
+  IRECT scaledBounds = UIToView(bounds).GetScaled(scale); // letterboxed: the UI's offset in the window (F69)
 
   mParamEditWnd = CreateWindowW(L"EDIT", UTF8AsUTF16(str).Get(), ES_AUTOHSCROLL /*only works for left aligned text*/ | WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS | WS_VISIBLE | ES_MULTILINE | editStyle,
     scaledBounds.L, scaledBounds.T, scaledBounds.W()+1, scaledBounds.H()+1,

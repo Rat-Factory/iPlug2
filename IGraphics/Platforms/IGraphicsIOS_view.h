@@ -21,11 +21,13 @@ BEGIN_IGRAPHICS_NAMESPACE
 
 inline CGRect ToCGRect(IGraphics* pGraphics, const IRECT& bounds)
 {
+  // UI coordinates -> the view's points (letterboxed: plus the UI's offset in the view, F69)
   float scale = pGraphics->GetDrawScale();
-  float x = floor(bounds.L * scale);
-  float y = floor(bounds.T * scale);
-  float x2 = ceil(bounds.R * scale);
-  float y2 = ceil(bounds.B * scale);
+  const float ox = pGraphics->GetLetterboxOffsetX(), oy = pGraphics->GetLetterboxOffsetY();
+  float x = floor(ox + bounds.L * scale);
+  float y = floor(oy + bounds.T * scale);
+  float x2 = ceil(ox + bounds.R * scale);
+  float y2 = ceil(oy + bounds.B * scale);
   
   return CGRectMake(x, y, x2 - x, y2 - y);
 }

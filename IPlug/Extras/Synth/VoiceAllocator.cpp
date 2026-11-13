@@ -553,6 +553,11 @@ void VoiceAllocator::NoteOff(VoiceInputEvent e, int64_t sampleTime)
 
 void VoiceAllocator::ProcessVoices(sample** inputs, sample** outputs, int nInputs, int nOutputs, int startIndex, int blockSize)
 {
+  if(mVoiceRenderFn)
+  {
+    mVoiceRenderFn(mVoiceRenderCtx, mVoicePtrs.data(), static_cast<int>(mVoicePtrs.size()), inputs, outputs, nInputs, nOutputs, startIndex, blockSize);
+    return;
+  }
   for(auto pVoice : mVoicePtrs)
   {
     // TODO distribute voices across cores

@@ -118,6 +118,12 @@ public:
     mVoiceAllocator.SetControlGlideTime(t);
   }
 
+  /** See VoiceAllocator::SetVoiceRenderer() */
+  void SetVoiceRenderer(VoiceAllocator::VoiceRenderFn fn, void* ctx)
+  {
+    mVoiceAllocator.SetVoiceRenderer(fn, ctx);
+  }
+
   SynthVoice* GetVoice(int voiceIdx)
   {
     return mVoiceAllocator.GetVoice(voiceIdx);

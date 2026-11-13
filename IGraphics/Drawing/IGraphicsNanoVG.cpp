@@ -47,7 +47,15 @@
       #error Define either IGRAPHICS_GL2 or IGRAPHICS_GL3 when using IGRAPHICS_GL and IGRAPHICS_NANOVG with OS_WIN
     #endif
   #elif defined OS_LINUX
-    #error NOT IMPLEMENTED
+    #if defined IGRAPHICS_GLES2
+      #include <GLES2/gl2.h>
+      #define NANOVG_GLES2_IMPLEMENTATION
+    #elif defined IGRAPHICS_GLES3
+      #include <GLES3/gl3.h>
+      #define NANOVG_GLES3_IMPLEMENTATION
+    #else
+      #error On Linux, IGRAPHICS_NANOVG needs IGRAPHICS_GLES2 or IGRAPHICS_GLES3 (EGL; see IGraphicsKMS)
+    #endif
   #elif defined OS_WEB
     #if defined IGRAPHICS_GLES2
       #define NANOVG_GLES2_IMPLEMENTATION
@@ -456,6 +464,10 @@ void IGraphicsNanoVG::OnViewInitialized(void* pContext)
 {  
 #if defined IGRAPHICS_METAL
   mVG = nvgCreateContext(pContext, NVG_ANTIALIAS | NVG_TRIPLE_BUFFER); //TODO: NVG_STENCIL_STROKES currently has issues
+#elif defined OS_LINUX && defined IGRAPHICS_GLES2
+  // IGraphicsKMS: clip every draw call with the GL scissor too, so a partial redraw costs the
+  // GPU the dirty area and not the whole window per dirty rect (vc4, Raspberry Pi 3)
+  mVG = nvgCreateContext(NVG_ANTIALIAS | (mScissorHW ? NVG_SCISSOR_HW : 0));
 #else
   mVG = nvgCreateContext(NVG_ANTIALIAS /*| NVG_STENCIL_STROKES*/);
 #endif
@@ -506,8 +518,13 @@ void IGraphicsNanoVG::BeginFrame()
 
 #ifdef IGRAPHICS_GL
     glViewport(0, 0, WindowWidth() * GetScreenScale(), WindowHeight() * GetScreenScale());
-    glClearColor(0.f, 0.f, 0.f, 0.f);
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    // With a present target, EndFrame() clears what it presents (possibly only the changed
+    // region, the rest of the surface kept): clearing the whole window here would undo that.
+    if (mPresentW <= 0)
+    {
+      glClearColor(0.f, 0.f, 0.f, 0.f);
+      glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    }
   #if defined OS_MAC || defined OS_IOS
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &mInitialFBO); // stash apple fbo
   #endif
@@ -521,6 +538,50 @@ void IGraphicsNanoVG::EndFrame()
 {
   nvgEndFrame(mVG); // end main frame buffer update
   nvgBindFramebuffer(nullptr);
+  OnPanelFlushed();
+
+#ifdef IGRAPHICS_GL
+  if (mPresentW > 0 && mPresentH > 0)
+  {
+    // Present into a surface larger than the panel (F69 pillarbox / letterbox): the whole
+    // surface is the viewport, the matte fills it, the panel lands at (mPresentX, mPresentY).
+    const float ss = GetScreenScale();
+    const IRECT& pr = mPresentRegion;
+    const bool partial = pr.W() > 0.f && pr.H() > 0.f;
+    glViewport(0, 0, mPresentW, mPresentH);
+    if (partial)
+    {
+      // only the region changed since this buffer was last presented (buffer age): the GL scissor
+      // keeps the clear, and NVG_SCISSOR_HW the composite, to it (GL y is up)
+      glEnable(GL_SCISSOR_TEST);
+      glScissor(static_cast<GLint>(pr.L), static_cast<GLint>(mPresentH - pr.B), static_cast<GLsizei>(pr.W()), static_cast<GLsizei>(pr.H()));
+    }
+    glClearColor(mPresentMatte.R / 255.f, mPresentMatte.G / 255.f, mPresentMatte.B / 255.f, 1.f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+    if (partial)
+      glDisable(GL_SCISSOR_TEST);
+    nvgBeginFrame(mVG, mPresentW / ss, mPresentH / ss, ss);
+    if (partial)
+      nvgScissor(mVG, pr.L / ss, pr.T / ss, pr.W() / ss, pr.H() / ss); // surface pixels: before the rotation
+    // a rotated screen: the logical (landscape) space turned clockwise onto the surface, so that logical (0, 0) lands
+    // on the surface's top right (90), bottom right (180) or bottom left (270)
+    switch (mPresentRotation)
+    {
+      case 90:  nvgTranslate(mVG, mPresentW / ss, 0.f);           nvgRotate(mVG, NVG_PI * 0.5f); break;
+      case 180: nvgTranslate(mVG, mPresentW / ss, mPresentH / ss); nvgRotate(mVG, NVG_PI);        break;
+      case 270: nvgTranslate(mVG, 0.f, mPresentH / ss);           nvgRotate(mVG, NVG_PI * 1.5f); break;
+      default: break;
+    }
+    const float x = mPresentX / ss, y = mPresentY / ss;
+    NVGpaint img = nvgImagePattern(mVG, x, y, WindowWidth(), WindowHeight(), 0, mMainFrameBuffer->image, 1.0f);
+    nvgBeginPath(mVG);
+    nvgRect(mVG, x, y, WindowWidth(), WindowHeight());
+    nvgFillPaint(mVG, img);
+    nvgFill(mVG);
+  }
+  else
+#endif
+  {
   nvgBeginFrame(mVG, WindowWidth(), WindowHeight(), GetScreenScale());
   
   NVGpaint img = nvgImagePattern(mVG, 0, 0, WindowWidth(), WindowHeight(), 0, mMainFrameBuffer->image, 1.0f);
@@ -533,6 +594,7 @@ void IGraphicsNanoVG::EndFrame()
   nvgFillPaint(mVG, img);
   nvgFill(mVG);
   nvgRestore(mVG);
+  }
   
 #if (defined OS_MAC || defined OS_IOS) && defined IGRAPHICS_GL
   glBindFramebuffer(GL_FRAMEBUFFER, mInitialFBO); // restore apple fbo
@@ -803,6 +865,8 @@ void IGraphicsNanoVG::PathTransformSetMatrix(const IMatrix& m)
   }
   
   nvgResetTransform(mVG);
+  if (mLayers.empty()) // the main frame buffer: the UI at its letterbox offset (F69; 0 when not letterboxed)
+    nvgTranslate(mVG, GetLetterboxOffsetX(), GetLetterboxOffsetY());
   nvgScale(mVG, GetDrawScale(), GetDrawScale());
   nvgTranslate(mVG, xTranslate, yTranslate);
   nvgTransform(mVG, m.mXX, m.mYX, m.mXY, m.mYY, m.mTX, m.mTY);

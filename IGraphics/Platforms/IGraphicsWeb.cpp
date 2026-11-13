@@ -1252,12 +1252,16 @@ void IGraphicsWeb::CreatePlatformTextEntry(int paramIdx, const IText& text, cons
     input["style"].set(colorName, std::string(str.Get()));
   };
 
+  // UI coordinates -> CSS pixels over the canvas: the draw scale, and letterboxed the UI's offset in it (F69)
+  const double scale = static_cast<double>(GetDrawScale());
+  const IRECT viewBounds = UIToView(bounds);
+
   input.set("id", std::string("textEntry"));
   input["style"].set("position", val("fixed"));
-  setDim("left", rect["left"].as<double>() + bounds.L);
-  setDim("top", rect["top"].as<double>() + bounds.T);
-  setDim("width", bounds.W());
-  setDim("height", bounds.H());
+  setDim("left", rect["left"].as<double>() + viewBounds.L * scale);
+  setDim("top", rect["top"].as<double>() + viewBounds.T * scale);
+  setDim("width", viewBounds.W() * scale);
+  setDim("height", viewBounds.H() * scale);
   
   setColor("color", text.mTextEntryFGColor);
   setColor("background-color", text.mTextEntryBGColor);
@@ -1467,8 +1471,9 @@ IPopupMenu* IGraphicsWeb::CreatePlatformPopupMenu(IPopupMenu& menu, const IRECT 
 
   const val rect = mCanvas.call<val>("getBoundingClientRect");
   const double scale = static_cast<double>(GetDrawScale());
-  const double viewportX = rect["left"].as<double>() + (bounds.L * scale);
-  const double viewportY = rect["top"].as<double>() + (bounds.B * scale);
+  const IRECT viewBounds = UIToView(bounds); // letterboxed: the UI's offset in the canvas (F69)
+  const double viewportX = rect["left"].as<double>() + (viewBounds.L * scale);
+  const double viewportY = rect["top"].as<double>() + (viewBounds.B * scale);
   iplug_popup_menu_show_js(this, viewportX, viewportY, json.c_str());
 
   return nullptr;
@@ -1523,8 +1528,10 @@ bool IGraphicsWeb::OpenURL(const char* url, const char* msgWindowTitle, const ch
 void IGraphicsWeb::DrawResize()
 {
   // CSS style.width/height need "px" suffix
-  std::string widthPx = std::to_string(static_cast<int>(Width() * GetDrawScale())) + "px";
-  std::string heightPx = std::to_string(static_cast<int>(Height() * GetDrawScale())) + "px";
+  // letterboxed (FitToContainer(), F69): the canvas covers the container, WindowWidth() x WindowHeight()
+  const bool letterboxed = IsLetterboxed();
+  std::string widthPx = std::to_string(letterboxed ? WindowWidth() : static_cast<int>(Width() * GetDrawScale())) + "px";
+  std::string heightPx = std::to_string(letterboxed ? WindowHeight() : static_cast<int>(Height() * GetDrawScale())) + "px";
   mCanvas["style"].set("width", val(widthPx));
   mCanvas["style"].set("height", val(heightPx));
 
@@ -1532,8 +1539,8 @@ void IGraphicsWeb::DrawResize()
   // Assigning these clears the WebGL drawing buffer even when the value
   // is unchanged, so guard against redundant writes — otherwise every
   // ResizeObserver tick during a drag causes a visible flash.
-  const int newBufW = Width() * GetBackingPixelScale();
-  const int newBufH = Height() * GetBackingPixelScale();
+  const int newBufW = letterboxed ? static_cast<int>(WindowWidth() * GetScreenScale()) : static_cast<int>(Width() * GetBackingPixelScale());
+  const int newBufH = letterboxed ? static_cast<int>(WindowHeight() * GetScreenScale()) : static_cast<int>(Height() * GetBackingPixelScale());
   const int curBufW = mCanvas["width"].as<int>();
   const int curBufH = mCanvas["height"].as<int>();
   if (newBufW != curBufW || newBufH != curBufH)

@@ -92,6 +92,15 @@ bool IPlugHeadless::HeadlessPushSysEx(const ISysEx& msg)
   return mSysExMsgsFromHost.Push(data);
 }
 
+void IPlugHeadless::HeadlessSetInputChannels(int n)
+{
+  const int maxN = MaxNChannels(ERoute::kInput);
+  n = n < 0 ? 0 : (n > maxN ? maxN : n);
+
+  SetChannelConnections(ERoute::kInput, 0, maxN, false);
+  SetChannelConnections(ERoute::kInput, 0, n, true);
+}
+
 void IPlugHeadless::HeadlessProcess(double** inputs, double** outputs, int nFrames)
 {
   if (inputs)
