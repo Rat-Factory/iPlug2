@@ -131,6 +131,10 @@ using namespace igraphics;
   IGRAPHICS_TEXTFIELD* mTextFieldView;
   NSCursor* mMoveCursor;
   float mPrevX, mPrevY;
+  // corner-drag resize, measured in screen space from where it started (see mouseDragged:)
+  bool mResizeTracking;
+  NSPoint mResizeStartScreen;
+  float mResizeStartViewX, mResizeStartViewY;
   bool mMouseOutDuringDrag;
   IRECTList mDirtyRects;
   IColorPickerHandlerFunc mColorPickerFunc;
