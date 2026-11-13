@@ -902,6 +902,16 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
     {
       std::vector<IMouseInfo> list {info};
       mGraphics->OnMouseDown(list);
+
+      // A press on the corner resizer starts a drag resize: remember where it began, in screen
+      // space and in view points, for mouseDragged:.
+      mResizeTracking = mGraphics->GetResizingInProcess();
+      if (mResizeTracking)
+      {
+        mResizeStartScreen = [NSEvent mouseLocation];
+        mResizeStartViewX = info.x * mGraphics->GetDrawScale();
+        mResizeStartViewY = info.y * mGraphics->GetDrawScale();
+      }
     }
   }
 }
@@ -909,6 +919,7 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
 - (void) mouseUp: (NSEvent*) pEvent
 {
   IMouseInfo info = [self getMouseLeft:pEvent];
+  mResizeTracking = false;
   if (mGraphics)
   {
     std::vector<IMouseInfo> list {info};
@@ -928,6 +939,18 @@ static CVReturn displayLinkCallback(CVDisplayLinkRef displayLink, const CVTimeSt
   float prevX = mPrevX;
   float prevY = mPrevY;
   IMouseInfo info = [self getMouseLeft:pEvent];
+  if (mGraphics && mResizeTracking && mGraphics->GetResizingInProcess())
+  {
+    // During a corner drag the view, and in an out-of-process host (Logic's AUHostingService)
+    // the window holding it, move under the pointer as they resize, a moment out of step with
+    // the events. A position read against the view then feeds the resize back into itself and
+    // jitters. Measure the drag in screen space instead: where the corner would be is where it
+    // started plus how far the pointer has moved (screen y runs upward, view y downward).
+    const NSPoint now = [NSEvent mouseLocation];
+    const float scale = mGraphics->GetDrawScale();
+    info.x = (mResizeStartViewX + static_cast<float>(now.x - mResizeStartScreen.x)) / scale;
+    info.y = (mResizeStartViewY + static_cast<float>(mResizeStartScreen.y - now.y)) / scale;
+  }
   if (mGraphics && !mGraphics->IsInPlatformTextEntry())
   {
     info.dX = info.x - prevX;
@@ -1440,12 +1463,36 @@ static void MakeCursorFromName(NSCursor*& cursor, const char *name)
 
   [(CAMetalLayer*)[self layer] setDrawableSize:CGSizeMake(self.frame.size.width * scale,
                                                           self.frame.size.height * scale)];
+
+  [self notifyHostResize];
 }
 #endif
+
+// AUv2 has no host-resize callback (the VST3 and APP wrappers call OnParentWindowResize from their
+// own resize paths): an AU host that resizes the plug-in just changes this view's frame, and
+// without this the drawable grows while the UI does not (uninitialised surface shows). Pass the
+// new size on to the delegate, as the other formats do. A frame IGraphics set itself
+// (PlatformResize, after a corner drag or a Resize()) is the size IGraphics already has, and is
+// not passed on. (Logic does not resize AU views from its window edge at all; this is for hosts
+// that do.)
+- (void) notifyHostResize
+{
+#if defined(AU_API)
+  if (!mGraphics)
+    return;
+  const int w = static_cast<int>(self.frame.size.width);
+  const int h = static_cast<int>(self.frame.size.height);
+  if (w > 0 && h > 0 && (w != mGraphics->WindowWidth() || h != mGraphics->WindowHeight()))
+  {
+    mGraphics->GetDelegate()->OnParentWindowResize(w, h);
+  }
+#endif
+}
 #if defined IGRAPHICS_GL2 || defined IGRAPHICS_GL3
 - (void) frameDidChange:(NSNotification*) pNotification
 {
   [self activateGLContext];
+  [self notifyHostResize];
 }
 #endif
 
