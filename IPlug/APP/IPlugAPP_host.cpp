@@ -679,7 +679,7 @@ bool IPlugAPPHost::InitMidi()
   }
 
   mMidiIn->setCallback(&MIDICallback, this);
-  mMidiIn->ignoreTypes(false, true, false );
+  mMidiIn->ignoreTypes(false, false, false );
 
   return true;
 }
